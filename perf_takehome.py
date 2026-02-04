@@ -157,8 +157,20 @@ class KernelBuilder:
 
         ops = []
         for engine, slot in slots:
-            reads, writes = self._slot_reads_writes(engine, slot)
-            ops.append((engine, slot, reads, writes))
+            if isinstance(slot, list):
+                reads = set()
+                writes = set()
+                for subslot in slot:
+                    sub_reads, sub_writes = self._slot_reads_writes(engine, subslot)
+                    reads.update(sub_reads)
+                    writes.update(sub_writes)
+                slot_list = slot
+                slot_count = len(slot)
+            else:
+                reads, writes = self._slot_reads_writes(engine, slot)
+                slot_list = [slot]
+                slot_count = 1
+            ops.append((engine, slot_list, reads, writes, slot_count))
 
         n_ops = len(ops)
         strict_succs = [set() for _ in range(n_ops)]
@@ -169,7 +181,7 @@ class KernelBuilder:
         last_write = [-1] * SCRATCH_SIZE
         last_read = [-1] * SCRATCH_SIZE
 
-        for i, (_, _, reads, writes) in enumerate(ops):
+        for i, (_, _, reads, writes, _) in enumerate(ops):
             for addr in reads:
                 lw = last_write[addr]
                 if lw != -1 and i not in strict_succs[lw]:
@@ -221,8 +233,8 @@ class KernelBuilder:
                     deferred.append(i)
                     continue
 
-                engine = ops[i][0]
-                if engine_counts[engine] >= SLOT_LIMITS[engine]:
+                engine, slot_list, _, _, slot_count = ops[i]
+                if engine_counts[engine] + slot_count > SLOT_LIMITS[engine]:
                     deferred.append(i)
                     continue
 
@@ -230,8 +242,8 @@ class KernelBuilder:
                 scheduled[i] = True
                 remaining -= 1
 
-                engine_counts[engine] += 1
-                bundle.setdefault(engine, []).append(ops[i][1])
+                engine_counts[engine] += slot_count
+                bundle.setdefault(engine, []).extend(slot_list)
 
                 for succ in strict_succs[i]:
                     strict_pred_count[succ] -= 1
@@ -266,7 +278,10 @@ class KernelBuilder:
         if not vliw:
             instrs = []
             for engine, slot in slots:
-                instrs.append({engine: [slot]})
+                if isinstance(slot, list):
+                    instrs.append({engine: slot})
+                else:
+                    instrs.append({engine: [slot]})
             return instrs
 
         if not self.emit_debug:
@@ -310,8 +325,15 @@ class KernelBuilder:
         slots = []
 
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
-            slots.append(("alu", (op1, tmp1, val_hash_addr, self.scratch_const(val1))))
-            slots.append(("alu", (op3, tmp2, val_hash_addr, self.scratch_const(val3))))
+            slots.append(
+                (
+                    "alu",
+                    [
+                        (op1, tmp1, val_hash_addr, self.scratch_const(val1)),
+                        (op3, tmp2, val_hash_addr, self.scratch_const(val3)),
+                    ],
+                )
+            )
             slots.append(("alu", (op2, val_hash_addr, tmp1, tmp2)))
             slots.append(("debug", ("compare", val_hash_addr, (round, i, "hash_stage", hi))))
 
@@ -321,8 +343,15 @@ class KernelBuilder:
         slots = []
 
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
-            slots.append(("valu", (op1, tmp1, val_hash_addr, vec_const_map[val1])))
-            slots.append(("valu", (op3, tmp2, val_hash_addr, vec_const_map[val3])))
+            slots.append(
+                (
+                    "valu",
+                    [
+                        (op1, tmp1, val_hash_addr, vec_const_map[val1]),
+                        (op3, tmp2, val_hash_addr, vec_const_map[val3]),
+                    ],
+                )
+            )
             slots.append(("valu", (op2, val_hash_addr, tmp1, tmp2)))
             slots.append(
                 (

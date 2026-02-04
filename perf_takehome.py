@@ -297,10 +297,25 @@ class KernelBuilder:
 
         import heapq
 
+        # Compute critical path length for each op (longest path to any terminal)
+        # using reverse topological order
+        crit_path = [1] * n_ops  # each op has at least length 1
+        # Process in reverse topological order (reverse of original index order
+        # works since dependencies only go forward)
+        for i in range(n_ops - 1, -1, -1):
+            max_succ = 0
+            for s in strict_succs[i]:
+                if crit_path[s] > max_succ:
+                    max_succ = crit_path[s]
+            for s in weak_succs[i]:
+                if crit_path[s] > max_succ:
+                    max_succ = crit_path[s]
+            crit_path[i] = 1 + max_succ
+
         ready_heap = []
         for i in range(n_ops):
             if strict_pred_count[i] == 0 and weak_pred_count[i] == 0:
-                heapq.heappush(ready_heap, i)
+                heapq.heappush(ready_heap, (-crit_path[i], i))
 
         max_strict_pred_cycle = [-1] * n_ops
         max_weak_pred_cycle = [-1] * n_ops
@@ -317,20 +332,20 @@ class KernelBuilder:
             scheduled_any = False
 
             while ready_heap:
-                i = heapq.heappop(ready_heap)
+                neg_cp, i = heapq.heappop(ready_heap)
                 if scheduled[i]:
                     continue
 
                 if max_strict_pred_cycle[i] + 1 > cycle:
-                    deferred.append(i)
+                    deferred.append((-crit_path[i], i))
                     continue
                 if max_weak_pred_cycle[i] > cycle:
-                    deferred.append(i)
+                    deferred.append((-crit_path[i], i))
                     continue
 
                 engine, slot_list, _, _, slot_count = ops[i]
                 if engine_counts[engine] + slot_count > SLOT_LIMITS[engine]:
-                    deferred.append(i)
+                    deferred.append((-crit_path[i], i))
                     continue
 
                 scheduled_any = True
@@ -345,14 +360,14 @@ class KernelBuilder:
                     if max_strict_pred_cycle[succ] < cycle:
                         max_strict_pred_cycle[succ] = cycle
                     if strict_pred_count[succ] == 0 and weak_pred_count[succ] == 0:
-                        heapq.heappush(ready_heap, succ)
+                        heapq.heappush(ready_heap, (-crit_path[succ], succ))
 
                 for succ in weak_succs[i]:
                     weak_pred_count[succ] -= 1
                     if max_weak_pred_cycle[succ] < cycle:
                         max_weak_pred_cycle[succ] = cycle
                     if strict_pred_count[succ] == 0 and weak_pred_count[succ] == 0:
-                        heapq.heappush(ready_heap, succ)
+                        heapq.heappush(ready_heap, (-crit_path[succ], succ))
 
             if not scheduled_any:
                 raise RuntimeError("VLIW scheduler deadlock (no schedulable ops)")
@@ -438,7 +453,18 @@ class KernelBuilder:
         slots = []
 
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
-            if op2 == "+" and op3 == "<<":
+            if op1 == "+" and op2 == "+" and op3 == "<<":
+                # Algebraic simplification: a*(1<<shift) + (a + const)
+                # = a*((1<<shift)+1) + const → single multiply_add
+                combined_mul = (1 << val3) + 1
+                combined_mul_vec = vec_const_map[combined_mul]
+                slots.append(
+                    (
+                        "valu",
+                        ("multiply_add", val_hash_addr, val_hash_addr, combined_mul_vec, vec_const_map[val1]),
+                    )
+                )
+            elif op2 == "+" and op3 == "<<":
                 slots.append(
                     ("valu", (op1, tmp1, val_hash_addr, vec_const_map[val1]))
                 )
@@ -486,6 +512,9 @@ class KernelBuilder:
         tmp1 = self.alloc_scratch("tmp1")
         tmp2 = self.alloc_scratch("tmp2")
         tmp3 = self.alloc_scratch("tmp3")
+
+        header = []  # collect header ops for VLIW scheduling
+
         # Scratch space addresses (header indices are fixed in build_mem_image)
         init_vars = [
             ("n_nodes", 1),
@@ -493,13 +522,25 @@ class KernelBuilder:
             ("inp_indices_p", 5),
             ("inp_values_p", 6),
         ]
+        # Use separate tmp addresses for each header load to avoid WAW serialization
+        header_tmp_addrs = []
         for name, _ in init_vars:
             self.alloc_scratch(name, 1)
-        for name, header_idx in init_vars:
-            self.add("load", ("const", tmp1, header_idx))
-            self.add("load", ("load", self.scratch[name], tmp1))
+            header_tmp_addrs.append(self.alloc_scratch())
+        for idx_i, (name, header_idx) in enumerate(init_vars):
+            htmp = header_tmp_addrs[idx_i]
+            header.append(("load", ("const", htmp, header_idx)))
+            header.append(("load", ("load", self.scratch[name], htmp)))
 
-        one_const = self.scratch_const(1)
+        # scratch_const replacement for header: allocate and emit to header list
+        def header_scratch_const(val, name=None):
+            if val not in self.const_map:
+                addr = self.alloc_scratch(name)
+                self.const_map[val] = addr
+                header.append(("load", ("const", addr, val)))
+            return self.const_map[val]
+
+        one_const = header_scratch_const(1)
 
         vec_const_map = {}
 
@@ -507,30 +548,37 @@ class KernelBuilder:
             if val in vec_const_map:
                 return vec_const_map[val]
             addr = self.alloc_scratch(name, length=VLEN)
-            self.add("valu", ("vbroadcast", addr, self.scratch_const(val)))
+            scalar_addr = header_scratch_const(val)
+            header.append(("valu", ("vbroadcast", addr, scalar_addr)))
             vec_const_map[val] = addr
             return addr
 
         vec_one = alloc_vec_const(1, "vec_one")
         vec_two = alloc_vec_const(2, "vec_two")
 
-        for hi, (_, val1, op2, op3, val3) in enumerate(HASH_STAGES):
+        for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
             alloc_vec_const(val1, f"hash_c1_{hi}")
             alloc_vec_const(val3, f"hash_c3_{hi}")
             if op2 == "+" and op3 == "<<":
-                mul_val = 1 << val3
-                if mul_val not in vec_const_map:
-                    mul_const = self.alloc_scratch(f"hash_mul_{hi}", VLEN)
-                    self.add(
-                        "valu",
-                        ("<<", mul_const, vec_one, vec_const_map[val3]),
-                    )
-                    vec_const_map[mul_val] = mul_const
+                if op1 == "+":
+                    # Algebraic simplification: a*(1<<shift) + (a + const)
+                    # = a*((1<<shift)+1) + const → single multiply_add
+                    combined_mul = (1 << val3) + 1
+                    alloc_vec_const(combined_mul, f"hash_combined_mul_{hi}")
+                else:
+                    mul_val = 1 << val3
+                    if mul_val not in vec_const_map:
+                        mul_const = self.alloc_scratch(f"hash_mul_{hi}", VLEN)
+                        header.append(
+                            ("valu",
+                            ("<<", mul_const, vec_one, vec_const_map[val3]))
+                        )
+                        vec_const_map[mul_val] = mul_const
 
         vec_n_nodes = self.alloc_scratch("vec_n_nodes", VLEN)
-        self.add("valu", ("vbroadcast", vec_n_nodes, self.scratch["n_nodes"]))
+        header.append(("valu", ("vbroadcast", vec_n_nodes, self.scratch["n_nodes"])))
         vec_forest_base = self.alloc_scratch("vec_forest_base", VLEN)
-        self.add("valu", ("vbroadcast", vec_forest_base, self.scratch["forest_values_p"]))
+        header.append(("valu", ("vbroadcast", vec_forest_base, self.scratch["forest_values_p"])))
         idx_arr = self.alloc_scratch("idx_arr", batch_size)
         val_arr = self.alloc_scratch("val_arr", batch_size)
 
@@ -538,15 +586,21 @@ class KernelBuilder:
         # kernel to let you debug at intermediate steps. The testing harness in this
         # file requires these match up to the reference kernel's yields, but the
         # submission harness ignores them.
-        self.add("flow", ("pause",))
+        if self.emit_debug:
+            # Schedule header separately before the pause barrier
+            header_instrs = self.build(header, vliw=True)
+            self.instrs.extend(header_instrs)
+            self.instrs.append({"flow": [("pause",)]})
         # Any debug engine instruction is ignored by the submission simulator
         self.add("debug", ("comment", "Starting loop"))
 
-        body = []  # array of slots
+        # In non-debug mode, merge header into body for joint VLIW scheduling
+        body = list(header) if not self.emit_debug else []
 
         # Scalar scratch registers (tail handling)
         tmp_node_val = self.alloc_scratch("tmp_node_val")
         tmp_addr = self.alloc_scratch("tmp_addr")
+        tmp_addr_b = self.alloc_scratch("tmp_addr_b")
 
         interleave_groups = 8
         group_regs = []
@@ -643,27 +697,40 @@ class KernelBuilder:
                 )
             )
 
+        # Pre-allocate offset constant scratch addresses and emit loads into body
+        # so VLIW scheduler can pair them (instead of single-load cycles via self.add)
+        offset_addrs = {}
+        all_offsets = set()
         for base in range(0, vec_count, VLEN):
-            offset_const = self.scratch_const(base)
+            all_offsets.add(base)
+        for i in range(vec_count, batch_size):
+            all_offsets.add(i)
+        for off in sorted(all_offsets):
+            if off not in self.const_map:
+                addr = self.alloc_scratch()
+                self.const_map[off] = addr
+            offset_addrs[off] = self.const_map[off]
+            body.append(("load", ("const", offset_addrs[off], off)))
+
+        for base in range(0, vec_count, VLEN):
             body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_const))
+                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
+            )
+            body.append(
+                ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
             )
             body.append(("load", ("vload", idx_arr + base, tmp_addr)))
-            body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_values_p"], offset_const))
-            )
-            body.append(("load", ("vload", val_arr + base, tmp_addr)))
+            body.append(("load", ("vload", val_arr + base, tmp_addr_b)))
 
         for i in range(vec_count, batch_size):
-            offset_const = self.scratch_const(i)
             body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_const))
+                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[i]))
+            )
+            body.append(
+                ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[i]))
             )
             body.append(("load", ("load", idx_arr + i, tmp_addr)))
-            body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_values_p"], offset_const))
-            )
-            body.append(("load", ("load", val_arr + i, tmp_addr)))
+            body.append(("load", ("load", val_arr + i, tmp_addr_b)))
 
         for round in range(rounds):
             for base in range(0, vec_count, VLEN * interleave_groups):
@@ -699,31 +766,30 @@ class KernelBuilder:
                 body.append(("debug", ("compare", idx_addr, (round, i, "wrapped_idx"))))
 
         for base in range(0, vec_count, VLEN):
-            offset_const = self.scratch_const(base)
             body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_const))
+                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
+            )
+            body.append(
+                ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
             )
             body.append(("store", ("vstore", tmp_addr, idx_arr + base)))
-            body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_values_p"], offset_const))
-            )
-            body.append(("store", ("vstore", tmp_addr, val_arr + base)))
+            body.append(("store", ("vstore", tmp_addr_b, val_arr + base)))
 
         for i in range(vec_count, batch_size):
-            offset_const = self.scratch_const(i)
             body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_const))
+                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[i]))
+            )
+            body.append(
+                ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[i]))
             )
             body.append(("store", ("store", tmp_addr, idx_arr + i)))
-            body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_values_p"], offset_const))
-            )
-            body.append(("store", ("store", tmp_addr, val_arr + i)))
+            body.append(("store", ("store", tmp_addr_b, val_arr + i)))
 
         body_instrs = self.build(body, vliw=True)
         self.instrs.extend(body_instrs)
         # Required to match with the yield in reference_kernel2
-        self.instrs.append({"flow": [("pause",)]})
+        if self.emit_debug:
+            self.instrs.append({"flow": [("pause",)]})
 
 BASELINE = 147734
 

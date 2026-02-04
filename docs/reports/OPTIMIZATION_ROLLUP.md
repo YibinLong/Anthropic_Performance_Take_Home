@@ -335,4 +335,4 @@ These are the cycle counts recorded in the task reports (note: some tasks were m
 - `problem.py` / `tests/frozen_problem.py`
   - `Machine.run()` cycle accounting and debug-only bundle behavior
   - ISA semantics for `valu`, `vload`, `load_offset`, and `flow.pause`
-  - `reference_kernel2()` yields and trace keys used by debug compares
+  - `reference_kernel2()` yields and trace keys used by debug comparesI want to continue work on this project. Right now a lot of work was already done.

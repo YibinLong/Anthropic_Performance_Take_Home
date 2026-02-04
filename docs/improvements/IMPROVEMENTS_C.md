@@ -52,7 +52,7 @@ Citation key: `(A#)` points to item `#` in `IMPROVEMENTS_A.md`, and `(B#)` point
    - **Pitfalls:** Watch scratch budget when using multiple interleaved groups.
    - **Status:** `vec_const_map` and `scratch_const()` deduplicate and pre-allocate constants.
 
-- [ ] **7. Running pointers for input arrays (B8)**
+- [x] **7. Running pointers for input arrays (B8)**
    - **Why it matters:** Avoid per-iteration `base + i` address arithmetic; pointer increments are cheap and allow packing with ALU/VALU ops.
    - **What to do:** Maintain `cur_idx_ptr` / `cur_val_ptr` and increment with `flow.add_imm`.
    - **Pitfalls:** Flow slots are scarce; schedule increments alongside non-flow ops.

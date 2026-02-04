@@ -446,7 +446,6 @@ class KernelBuilder:
                     "idx_ptr": self.alloc_scratch(f"idx_ptr_g{g}"),
                     "val_ptr": self.alloc_scratch(f"val_ptr_g{g}"),
                     "idx_ptr_next": self.alloc_scratch(f"idx_ptr_next_g{g}"),
-                    "val_ptr_next": self.alloc_scratch(f"val_ptr_next_g{g}"),
                     "vec_idx": self.alloc_scratch(f"vec_idx_g{g}", VLEN),
                     "vec_val": self.alloc_scratch(f"vec_val_g{g}", VLEN),
                     "vec_node_val": self.alloc_scratch(f"vec_node_val_g{g}", VLEN),
@@ -461,7 +460,6 @@ class KernelBuilder:
         tail_idx_ptr = self.alloc_scratch("tail_idx_ptr")
         tail_val_ptr = self.alloc_scratch("tail_val_ptr")
         tail_idx_ptr_next = self.alloc_scratch("tail_idx_ptr_next")
-        tail_val_ptr_next = self.alloc_scratch("tail_val_ptr_next")
 
         def emit_vector_group_ops(round, i, regs):
             keys = [(round, i + vi, "idx") for vi in range(VLEN)]
@@ -469,7 +467,6 @@ class KernelBuilder:
             idx_ptr = regs["idx_ptr"]
             val_ptr = regs["val_ptr"]
             idx_ptr_next = regs["idx_ptr_next"]
-            val_ptr_next = regs["val_ptr_next"]
             vec_idx = regs["vec_idx"]
             vec_val = regs["vec_val"]
             vec_node_val = regs["vec_node_val"]
@@ -553,7 +550,6 @@ class KernelBuilder:
                 )
             )
             body.append(("flow", ("add_imm", idx_ptr_next, idx_ptr, vec_stride)))
-            body.append(("flow", ("add_imm", val_ptr_next, val_ptr, vec_stride)))
             # mem[inp_indices_p + i] = idx
             body.append(("store", ("vstore", idx_ptr, vec_idx)))
             # mem[inp_values_p + i] = val
@@ -563,7 +559,7 @@ class KernelBuilder:
                     "alu",
                     [
                         ("+", idx_ptr, idx_ptr_next, zero_const),
-                        ("+", val_ptr, val_ptr_next, zero_const),
+                        ("+", val_ptr, idx_ptr_next, self.scratch["batch_size"]),
                     ],
                 )
             )
@@ -642,7 +638,6 @@ class KernelBuilder:
                 body.append(("alu", ("*", tmp_idx, tmp_idx, tmp1)))
                 body.append(("debug", ("compare", tmp_idx, (round, i, "wrapped_idx"))))
                 body.append(("flow", ("add_imm", tail_idx_ptr_next, tail_idx_ptr, 1)))
-                body.append(("flow", ("add_imm", tail_val_ptr_next, tail_val_ptr, 1)))
                 # mem[inp_indices_p + i] = idx
                 body.append(("store", ("store", tail_idx_ptr, tmp_idx)))
                 # mem[inp_values_p + i] = val
@@ -652,7 +647,7 @@ class KernelBuilder:
                         "alu",
                         [
                             ("+", tail_idx_ptr, tail_idx_ptr_next, zero_const),
-                            ("+", tail_val_ptr, tail_val_ptr_next, zero_const),
+                            ("+", tail_val_ptr, tail_idx_ptr_next, self.scratch["batch_size"]),
                         ],
                     )
                 )

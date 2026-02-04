@@ -76,10 +76,11 @@ Citation key: `(A#)` points to item `#` in `IMPROVEMENTS_A.md`, and `(B#)` point
    - **What to do:** For stages 0, 2, 4: `tmp1 = a + const`, then `a = multiply_add(a, shift_const, tmp1)`.
    - **Pitfalls:** Not applicable to XOR or right-shift stages; benefit is modest.
 
-- [ ] **11. Scratch register reuse / liveness-driven packing (B11)**
+- [x] **11. Scratch register reuse / liveness-driven packing (B11)**
    - **Why it matters:** Lower scratch usage enables deeper interleaving, which amplifies #3.
    - **What to do:** Reuse `addr_vec`/`node_val_vec` after they're dead.
    - **Pitfalls:** Requires careful tracking to avoid accidental clobbering in the scheduler.
+   - **Status:** Reused `vec_addr`/`vec_node_val` as hash temporaries per group.
 
 - [ ] **12. Slot utilization diagnostics (A14, B17)**
    - **Why it matters:** Helps you see which engines are underutilized and guides pipelining depth.

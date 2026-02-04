@@ -471,8 +471,6 @@ class KernelBuilder:
                     "vec_val": self.alloc_scratch(f"vec_val_g{g}", VLEN),
                     "vec_node_val": self.alloc_scratch(f"vec_node_val_g{g}", VLEN),
                     "vec_addr": self.alloc_scratch(f"vec_addr_g{g}", VLEN),
-                    "vec_tmp1": self.alloc_scratch(f"vec_tmp1_g{g}", VLEN),
-                    "vec_tmp2": self.alloc_scratch(f"vec_tmp2_g{g}", VLEN),
                 }
             )
 
@@ -492,8 +490,8 @@ class KernelBuilder:
             vec_val = regs["vec_val"]
             vec_node_val = regs["vec_node_val"]
             vec_addr = regs["vec_addr"]
-            vec_tmp1 = regs["vec_tmp1"]
-            vec_tmp2 = regs["vec_tmp2"]
+            vec_tmp1 = vec_addr
+            vec_tmp2 = vec_node_val
 
             # idx = mem[inp_indices_p + i:i+VLEN]
             body.append(("load", ("vload", vec_idx, idx_ptr)))

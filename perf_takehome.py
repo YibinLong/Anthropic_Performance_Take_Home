@@ -499,7 +499,6 @@ class KernelBuilder:
             self.add("load", ("const", tmp1, header_idx))
             self.add("load", ("load", self.scratch[name], tmp1))
 
-        zero_const = self.scratch_const(0)
         one_const = self.scratch_const(1)
 
         vec_const_map = {}
@@ -512,7 +511,6 @@ class KernelBuilder:
             vec_const_map[val] = addr
             return addr
 
-        vec_zero = alloc_vec_const(0, "vec_zero")
         vec_one = alloc_vec_const(1, "vec_one")
         vec_two = alloc_vec_const(2, "vec_two")
 
@@ -533,10 +531,6 @@ class KernelBuilder:
         self.add("valu", ("vbroadcast", vec_n_nodes, self.scratch["n_nodes"]))
         vec_forest_base = self.alloc_scratch("vec_forest_base", VLEN)
         self.add("valu", ("vbroadcast", vec_forest_base, self.scratch["forest_values_p"]))
-        tree_cache0 = self.alloc_scratch("tree_cache0")
-        self.add("load", ("load", tree_cache0, self.scratch["forest_values_p"]))
-        vec_tree_cache0 = self.alloc_scratch("vec_tree_cache0", VLEN)
-        self.add("valu", ("vbroadcast", vec_tree_cache0, tree_cache0))
         idx_arr = self.alloc_scratch("idx_arr", batch_size)
         val_arr = self.alloc_scratch("val_arr", batch_size)
 
@@ -561,7 +555,6 @@ class KernelBuilder:
                 {
                     "vec_node_val": self.alloc_scratch(f"vec_node_val_g{g}", VLEN),
                     "vec_addr": self.alloc_scratch(f"vec_addr_g{g}", VLEN),
-                    "vec_cache_tmp": self.alloc_scratch(f"vec_cache_tmp_g{g}", VLEN),
                 }
             )
 
@@ -574,7 +567,6 @@ class KernelBuilder:
             vec_val = val_arr + i
             vec_node_val = regs["vec_node_val"]
             vec_addr = regs["vec_addr"]
-            vec_cache_tmp = regs["vec_cache_tmp"]
             vec_tmp1 = vec_addr
             vec_tmp2 = vec_node_val
 
@@ -593,10 +585,6 @@ class KernelBuilder:
             body.append(("valu", ("+", vec_addr, vec_forest_base, vec_idx)))
             for offset in range(VLEN):
                 body.append(("load", ("load_offset", vec_node_val, vec_addr, offset)))
-            body.append(("valu", ("==", vec_tmp1, vec_idx, vec_zero)))
-            body.append(("valu", ("-", vec_cache_tmp, vec_tree_cache0, vec_node_val)))
-            body.append(("valu", ("*", vec_cache_tmp, vec_cache_tmp, vec_tmp1)))
-            body.append(("valu", ("+", vec_node_val, vec_node_val, vec_cache_tmp)))
             body.append(
                 (
                     "debug",
@@ -693,10 +681,6 @@ class KernelBuilder:
                 # node_val = mem[forest_values_p + idx]
                 body.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], idx_addr)))
                 body.append(("load", ("load", tmp_node_val, tmp_addr)))
-                body.append(("alu", ("==", tmp1, idx_addr, zero_const)))
-                body.append(("alu", ("-", tmp3, tree_cache0, tmp_node_val)))
-                body.append(("alu", ("*", tmp3, tmp3, tmp1)))
-                body.append(("alu", ("+", tmp_node_val, tmp_node_val, tmp3)))
                 body.append(("debug", ("compare", tmp_node_val, (round, i, "node_val"))))
                 # val = myhash(val ^ node_val)
                 body.append(("alu", ("^", val_addr, val_addr, tmp_node_val)))

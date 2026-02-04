@@ -10,7 +10,7 @@ Implemented multi-group interleaving for the vectorized inner loop in `perf_take
 - **Loop restructuring:** The vector loop now processes chunks of `VLEN * interleave_groups` and emits per-group ops via a helper (`emit_vector_group_ops`). This keeps register dependencies isolated per group so the scheduler can interleave across groups.
 
 ## Rationale
-The previous single-group vector loop reused the same scratch registers each iteration, which forced the scheduler to serialize work. By duplicating registers across groups and unrolling the loop in chunks, we create multiple independent dependency chains. This is the software pipelining / multi-group interleaving described in `IMPROVEMENTS_C.md` task 3.
+The previous single-group vector loop reused the same scratch registers each iteration, which forced the scheduler to serialize work. By duplicating registers across groups and unrolling the loop in chunks, we create multiple independent dependency chains. This is the software pipelining / multi-group interleaving described in `C_improvements.md` task 3.
 
 ## Tests Run
 Command (per `docs/running-tests.md`):

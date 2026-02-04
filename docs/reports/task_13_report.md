@@ -3,14 +3,14 @@
 Date: 2026-02-04
 
 ## Goal
-Implement IMPROVEMENTS_C.md task 13: remove unused header loads (rounds, batch_size, forest_height) from `KernelBuilder.build_kernel`, keeping only the headers actually used by the optimized kernel.
+Implement C_improvements.md task 13: remove unused header loads (rounds, batch_size, forest_height) from `KernelBuilder.build_kernel`, keeping only the headers actually used by the optimized kernel.
 
 ## What Changed
 - `perf_takehome.py`
   - Replaced the header init list with explicit `(name, header_index)` pairs so correct header indices are still loaded after removing unused headers.
   - Removed allocations/loads for `rounds`, `batch_size`, and `forest_height`.
   - Added a build-time `batch_size_const` and replaced pointer math that previously used `self.scratch["batch_size"]`.
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
   - Checked off task 13.
 
 ## Why the Header Index Fix Was Needed
@@ -42,5 +42,5 @@ Full test output (summary):
 
 ## Files Touched
 - `perf_takehome.py`
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
 - `docs/reports/task13_report.md`

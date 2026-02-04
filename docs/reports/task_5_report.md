@@ -1,7 +1,7 @@
 # Task 5 Report: Remove flow selects with arithmetic (parity + wrap)
 
 ## Goal
-Implement IMPROVEMENTS_C.md task 5 only: replace flow `select`/`vselect` in the parity and wrap steps with pure ALU/VALU arithmetic.
+Implement C_improvements.md task 5 only: replace flow `select`/`vselect` in the parity and wrap steps with pure ALU/VALU arithmetic.
 
 ## Plan
 1. Locate parity + wrap logic in `perf_takehome.py` for both vector and scalar tail paths.
@@ -25,7 +25,7 @@ Files modified:
 - Speed tests: failed (6 failures). All runs reported `CYCLES: 2660` with speedup ~55.54x, which is above the tighter thresholds (e.g., 2164/1790/1579/1548/1487/1363).
 
 ## Notes / Issues
-- Performance thresholds are not met because only task 5 was implemented, as requested. Further improvements from IMPROVEMENTS_C.md would be required to pass the stricter speed tests.
+- Performance thresholds are not met because only task 5 was implemented, as requested. Further improvements from C_improvements.md would be required to pass the stricter speed tests.
 
 ## Status
 Task 5 implementation complete; no functional correctness regressions detected in the submission test suite.

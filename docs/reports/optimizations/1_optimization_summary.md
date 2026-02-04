@@ -2,9 +2,9 @@
 
 This document consolidates what was implemented (and what was tried/reverted) while working through:
 
-- `docs/improvements/IMPROVEMENTS_A.md`
-- `docs/improvements/IMPROVEMENTS_B.md`
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/A_improvements.md`
+- `docs/improvements/B_improvements.md`
+- `docs/improvements/C_improvements.md`
 - `docs/reports/task*_report.md`
 
 Primary implementation target: `perf_takehome.py` (especially `KernelBuilder.build_kernel()`).
@@ -31,7 +31,7 @@ python tests/submission_tests.py
 
 ## Architectural Facts That Drove Most Design Choices
 
-These are the key constraints from `problem.py` / `tests/frozen_problem.py` and summarized in `docs/improvements/IMPROVEMENTS_C.md`:
+These are the key constraints from `problem.py` / `tests/frozen_problem.py` and summarized in `docs/improvements/C_improvements.md`:
 
 - One instruction bundle per cycle; per-engine slot limits:
   - `alu` 12, `valu` 6, `load` 2, `store` 2, `flow` 1
@@ -75,7 +75,7 @@ The kernel in `perf_takehome.py` is an optimized, scheduled, SIMD implementation
 
 ## Implemented Optimizations (By Improvement/Task)
 
-Below is what was implemented, as captured by `docs/improvements/IMPROVEMENTS_C.md` and the per-task reports.
+Below is what was implemented, as captured by `docs/improvements/C_improvements.md` and the per-task reports.
 
 ### Task 1: Real VLIW scheduler / slot packer
 
@@ -232,7 +232,7 @@ Measured result at the time: no cycle change (still **2637** in those reports).
 
 ### Task 13: Eliminate unused header loads
 
-Files: `perf_takehome.py`, `docs/improvements/IMPROVEMENTS_C.md`
+Files: `perf_takehome.py`, `docs/improvements/C_improvements.md`
 
 Key implementation details:
 

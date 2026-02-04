@@ -1,13 +1,13 @@
 # Task 10 Report: multiply_add for applicable hash stages
 
 ## Goal
-Implement IMPROVEMENTS_C.md task 10 by using VALU `multiply_add` in the vector hash stages where the pattern is `(a OP1 const1) + (a << shift)`.
+Implement C_improvements.md task 10 by using VALU `multiply_add` in the vector hash stages where the pattern is `(a OP1 const1) + (a << shift)`.
 
 ## Plan
 1. Update `KernelBuilder.build_hash_vec()` to emit `multiply_add` for eligible stages (op2 `+` and op3 `<<`).
 2. Add vector constants for the shift multipliers used by `multiply_add`.
 3. Run `python tests/submission_tests.py` and record results.
-4. Check off task 10 in `IMPROVEMENTS_C.md`.
+4. Check off task 10 in `C_improvements.md`.
 
 ## Changes Made
 - **Vector hash stages:** `build_hash_vec()` now emits:
@@ -15,11 +15,11 @@ Implement IMPROVEMENTS_C.md task 10 by using VALU `multiply_add` in the vector h
   - `a = multiply_add(a, mul_const, tmp1)`
   for stages where `op2 == "+"` and `op3 == "<<"` (stages 0, 2, 4 in `HASH_STAGES`).
 - **Multiplier constants:** Precompute vector multipliers as `vec_one << shift_const` once before the loop and cache them in `vec_const_map` keyed by `1 << shift`.
-- **Checklist:** Task 10 checked off in `docs/improvements/IMPROVEMENTS_C.md`.
+- **Checklist:** Task 10 checked off in `docs/improvements/C_improvements.md`.
 
 Files updated:
 - `perf_takehome.py`
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
 
 ## Tests Run
 - `python tests/submission_tests.py`

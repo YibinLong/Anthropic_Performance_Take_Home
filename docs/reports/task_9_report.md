@@ -1,7 +1,7 @@
 # Task 9 Report: Remove pause/debug in submission path
 
 ## Goal
-Implement IMPROVEMENTS_C.md task 9: add an `emit_debug` flag that controls emission of `pause` and debug instructions, filtering them out in the submission path to save cycles.
+Implement C_improvements.md task 9: add an `emit_debug` flag that controls emission of `pause` and debug instructions, filtering them out in the submission path to save cycles.
 
 ## Plan
 1. Verify the `emit_debug` flag and its effect on instruction filtering in `perf_takehome.py`.

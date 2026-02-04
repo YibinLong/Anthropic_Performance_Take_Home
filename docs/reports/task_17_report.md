@@ -12,7 +12,7 @@ Implement IMPROVEMENTS_C task 17: cache top tree levels in scratch and use a con
     - If `idx == 0`, use the cached root; otherwise keep the memory-loaded value.
     - Implemented via arithmetic (`diff * cond + node_val`) to avoid flow selects.
   - Added `vec_cache_tmp` per interleave group to hold the cache blend intermediate.
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
   - Checked off task 17.
 
 ## Notes on Constraints
@@ -38,5 +38,5 @@ Result:
 
 ## Files Touched
 - `perf_takehome.py`
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
 - `docs/reports/task17_report.md`

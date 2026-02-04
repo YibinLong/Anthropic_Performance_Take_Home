@@ -1,8 +1,8 @@
-# Ranked Improvements (Consolidated Review of IMPROVEMENTS_A.md + IMPROVEMENTS_B.md)
+# Ranked Improvements (Consolidated Review of A_improvements.md + B_improvements.md)
 
 This file ranks the *most impactful* optimizations for this project, using the constraints in `perf_takehome.py` and `problem.py`. Items are merged/deduped from A and B, with notes on prerequisites, risks, and correctness.
 
-Citation key: `(A#)` points to item `#` in `IMPROVEMENTS_A.md`, and `(B#)` points to item `#` in `IMPROVEMENTS_B.md`. Example: **Real VLIW scheduler / slot packer (A1, B2, B13)** appears in A item 1 and B items 2 and 13.
+Citation key: `(A#)` points to item `#` in `A_improvements.md`, and `(B#)` points to item `#` in `B_improvements.md`. Example: **Real VLIW scheduler / slot packer (A1, B2, B13)** appears in A item 1 and B items 2 and 13.
 
 ## Architecture Constraints That Drive Impact
 

@@ -35,5 +35,5 @@ Result:
 
 ## Files Touched
 - `perf_takehome.py`
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
 - `docs/reports/task16_report.md`

@@ -1,7 +1,7 @@
 # Task One Report: VLIW Scheduler / Slot Packer (Full Implementation)
 
 ## Goal
-Implement the “real VLIW scheduler / slot packer” from `IMPROVEMENTS_C.md`:
+Implement the “real VLIW scheduler / slot packer” from `C_improvements.md`:
 pack independent ops into the same cycle while respecting engine slot limits
 and RAW/WAW hazards, allowing WAR in the same cycle.
 
@@ -49,5 +49,5 @@ optimizations beyond Task 1:
 - `test_opus45_improved_harness` (< 1,363)
 
 ## Notes / Next Improvements (Out of Scope)
-To reach sub-2k thresholds, additional items from `IMPROVEMENTS_C.md`
+To reach sub-2k thresholds, additional items from `C_improvements.md`
 are required (e.g., flow-select elimination, pipelining, scratch reuse).

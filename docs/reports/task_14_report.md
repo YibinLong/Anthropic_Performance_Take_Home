@@ -9,7 +9,7 @@ Implement IMPROVEMENTS_C task 14: small arithmetic simplifications in the hot pa
 - `perf_takehome.py`
   - Replaced vector `idx * 2` with `idx << 1` using `vec_one`.
   - Replaced scalar tail `idx * 2` with `idx << 1` using `one_const`.
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
   - Checked off task 14.
 
 ## Tests Run
@@ -32,5 +32,5 @@ Result:
 
 ## Files Touched
 - `perf_takehome.py`
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
 - `docs/reports/task14_report.md`

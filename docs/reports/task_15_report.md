@@ -9,7 +9,7 @@ Implement IMPROVEMENTS_C task 15: add an IR optimizer pass (dead-code eliminatio
 - `perf_takehome.py`
   - Added `_slot_side_effect()` and `_optimize_slots()` to perform a backward DCE pass over slot lists.
   - Integrated the optimizer into `KernelBuilder.build()` so each VLIW segment is optimized before scheduling.
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
   - Checked off task 15.
 
 ## Notes on Scope
@@ -37,5 +37,5 @@ Result:
 
 ## Files Touched
 - `perf_takehome.py`
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
 - `docs/reports/task15_report.md`

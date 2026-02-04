@@ -1,7 +1,7 @@
 # Task 8 Report: Loop structure decision (looped vs unrolled)
 
 ## Goal
-Implement IMPROVEMENTS_C.md task 8: use a looped implementation with `for round in range(rounds)` and a nested vector chunk loop, rather than fully unrolling the batch/round iterations.
+Implement C_improvements.md task 8: use a looped implementation with `for round in range(rounds)` and a nested vector chunk loop, rather than fully unrolling the batch/round iterations.
 
 ## Plan
 1. Verify the loop structure in `perf_takehome.py` — round loop, vector chunk loop, and scalar tail loop.

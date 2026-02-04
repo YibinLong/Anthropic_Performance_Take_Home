@@ -6,11 +6,11 @@ Add a slot-utilization diagnostic so we can see average per-engine slot usage pe
 ## Changes Made
 - Added `analyze_utilization`, `format_utilization`, and `print_utilization` helpers to compute per-engine averages, min/max, and utilization % from `kb.instrs` in `perf_takehome.py`.
 - Extended `do_kernel_test` with `utilization: bool = False`; when enabled it prints the utilization summary after the kernel is built.
-- Checked off task 12 in `docs/improvements/IMPROVEMENTS_C.md`.
+- Checked off task 12 in `docs/improvements/C_improvements.md`.
 
 Files updated:
 - `perf_takehome.py`
-- `docs/improvements/IMPROVEMENTS_C.md`
+- `docs/improvements/C_improvements.md`
 
 ## How It Works
 - The analyzer walks each instruction bundle and counts slots per engine.

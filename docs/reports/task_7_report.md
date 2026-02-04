@@ -1,7 +1,7 @@
 # Task 7 Report: Running pointers for input arrays
 
 ## Goal
-Implement IMPROVEMENTS_C.md task 7 only: keep running pointers for input indices/values and cut per-iteration address arithmetic, while preserving correctness under the VLIW scheduler.
+Implement C_improvements.md task 7 only: keep running pointers for input indices/values and cut per-iteration address arithmetic, while preserving correctness under the VLIW scheduler.
 
 ## Plan
 1. Inspect the vectorized inner-loop address handling in `perf_takehome.py` and map where input pointers are advanced.

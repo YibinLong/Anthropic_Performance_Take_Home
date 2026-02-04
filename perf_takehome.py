@@ -343,16 +343,28 @@ class KernelBuilder:
         slots = []
 
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
-            slots.append(
-                (
-                    "valu",
-                    [
-                        (op1, tmp1, val_hash_addr, vec_const_map[val1]),
-                        (op3, tmp2, val_hash_addr, vec_const_map[val3]),
-                    ],
+            if op2 == "+" and op3 == "<<":
+                slots.append(
+                    ("valu", (op1, tmp1, val_hash_addr, vec_const_map[val1]))
                 )
-            )
-            slots.append(("valu", (op2, val_hash_addr, tmp1, tmp2)))
+                mul_const = vec_const_map[1 << val3]
+                slots.append(
+                    (
+                        "valu",
+                        ("multiply_add", val_hash_addr, val_hash_addr, mul_const, tmp1),
+                    )
+                )
+            else:
+                slots.append(
+                    (
+                        "valu",
+                        [
+                            (op1, tmp1, val_hash_addr, vec_const_map[val1]),
+                            (op3, tmp2, val_hash_addr, vec_const_map[val3]),
+                        ],
+                    )
+                )
+                slots.append(("valu", (op2, val_hash_addr, tmp1, tmp2)))
             slots.append(
                 (
                     "debug",
@@ -413,9 +425,18 @@ class KernelBuilder:
         vec_one = alloc_vec_const(1, "vec_one")
         vec_two = alloc_vec_const(2, "vec_two")
 
-        for hi, (_, val1, _, _, val3) in enumerate(HASH_STAGES):
+        for hi, (_, val1, op2, op3, val3) in enumerate(HASH_STAGES):
             alloc_vec_const(val1, f"hash_c1_{hi}")
             alloc_vec_const(val3, f"hash_c3_{hi}")
+            if op2 == "+" and op3 == "<<":
+                mul_val = 1 << val3
+                if mul_val not in vec_const_map:
+                    mul_const = self.alloc_scratch(f"hash_mul_{hi}", VLEN)
+                    self.add(
+                        "valu",
+                        ("<<", mul_const, vec_one, vec_const_map[val3]),
+                    )
+                    vec_const_map[mul_val] = mul_const
 
         vec_n_nodes = self.alloc_scratch("vec_n_nodes", VLEN)
         self.add("valu", ("vbroadcast", vec_n_nodes, self.scratch["n_nodes"]))

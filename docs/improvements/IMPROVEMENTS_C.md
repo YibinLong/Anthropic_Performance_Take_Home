@@ -71,7 +71,7 @@ Citation key: `(A#)` points to item `#` in `IMPROVEMENTS_A.md`, and `(B#)` point
    - **Pitfalls:** Do not remove pauses if you rely on `reference_kernel2` yield alignment for debugging.
    - **Status:** `emit_debug` flag controls debug/pause emission; filtered out when `False`.
 
-- [ ] **10. `multiply_add` for applicable hash stages (B9)**
+- [x] **10. `multiply_add` for applicable hash stages (B9)**
    - **Why it matters:** Replaces shift+add with one VALU op for stages where op2 is `+` and op3 is `<<`.
    - **What to do:** For stages 0, 2, 4: `tmp1 = a + const`, then `a = multiply_add(a, shift_const, tmp1)`.
    - **Pitfalls:** Not applicable to XOR or right-shift stages; benefit is modest.

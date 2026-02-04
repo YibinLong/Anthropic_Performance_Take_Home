@@ -1,4 +1,4 @@
-# Task 13 Report — Eliminate Unused Header Loads
+# Task 13 Report: Eliminate Unused Header Loads
 
 Date: 2026-02-04
 
@@ -43,4 +43,4 @@ Full test output (summary):
 ## Files Touched
 - `perf_takehome.py`
 - `docs/improvements/IMPROVEMENTS_C.md`
-- `docs/reports/task13.md`
+- `docs/reports/task13_report.md`

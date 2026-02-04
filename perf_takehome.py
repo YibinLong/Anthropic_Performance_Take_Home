@@ -38,12 +38,13 @@ from problem import (
 
 
 class KernelBuilder:
-    def __init__(self):
+    def __init__(self, emit_debug: bool = False):
         self.instrs = []
         self.scratch = {}
         self.scratch_debug = {}
         self.scratch_ptr = 0
         self.const_map = {}
+        self.emit_debug = emit_debug
 
     def debug_info(self):
         return DebugInfo(scratch_map=self.scratch_debug)
@@ -138,6 +139,128 @@ class KernelBuilder:
 
         return reads, writes
 
+    def _is_barrier(self, engine: Engine, slot: tuple) -> bool:
+        if engine != "flow":
+            return False
+        return slot[0] in {
+            "halt",
+            "pause",
+            "cond_jump",
+            "cond_jump_rel",
+            "jump",
+            "jump_indirect",
+        }
+
+    def _schedule_vliw(self, slots: list[tuple[Engine, tuple]]):
+        if not slots:
+            return []
+
+        ops = []
+        for engine, slot in slots:
+            reads, writes = self._slot_reads_writes(engine, slot)
+            ops.append((engine, slot, reads, writes))
+
+        n_ops = len(ops)
+        strict_succs = [set() for _ in range(n_ops)]
+        weak_succs = [set() for _ in range(n_ops)]
+        strict_pred_count = [0] * n_ops
+        weak_pred_count = [0] * n_ops
+
+        last_write = [-1] * SCRATCH_SIZE
+        last_read = [-1] * SCRATCH_SIZE
+
+        for i, (_, _, reads, writes) in enumerate(ops):
+            for addr in reads:
+                lw = last_write[addr]
+                if lw != -1 and i not in strict_succs[lw]:
+                    strict_succs[lw].add(i)
+                    strict_pred_count[i] += 1
+                last_read[addr] = i
+            for addr in writes:
+                lw = last_write[addr]
+                if lw != -1 and i not in strict_succs[lw]:
+                    strict_succs[lw].add(i)
+                    strict_pred_count[i] += 1
+                lr = last_read[addr]
+                if lr != -1 and lr != i and i not in weak_succs[lr]:
+                    weak_succs[lr].add(i)
+                    weak_pred_count[i] += 1
+                last_write[addr] = i
+                last_read[addr] = -1
+
+        import heapq
+
+        ready_heap = []
+        for i in range(n_ops):
+            if strict_pred_count[i] == 0 and weak_pred_count[i] == 0:
+                heapq.heappush(ready_heap, i)
+
+        max_strict_pred_cycle = [-1] * n_ops
+        max_weak_pred_cycle = [-1] * n_ops
+        scheduled = [False] * n_ops
+
+        instrs = []
+        cycle = 0
+        remaining = n_ops
+
+        while remaining > 0:
+            bundle = {}
+            engine_counts = defaultdict(int)
+            deferred = []
+            scheduled_any = False
+
+            while ready_heap:
+                i = heapq.heappop(ready_heap)
+                if scheduled[i]:
+                    continue
+
+                if max_strict_pred_cycle[i] + 1 > cycle:
+                    deferred.append(i)
+                    continue
+                if max_weak_pred_cycle[i] > cycle:
+                    deferred.append(i)
+                    continue
+
+                engine = ops[i][0]
+                if engine_counts[engine] >= SLOT_LIMITS[engine]:
+                    deferred.append(i)
+                    continue
+
+                scheduled_any = True
+                scheduled[i] = True
+                remaining -= 1
+
+                engine_counts[engine] += 1
+                bundle.setdefault(engine, []).append(ops[i][1])
+
+                for succ in strict_succs[i]:
+                    strict_pred_count[succ] -= 1
+                    if max_strict_pred_cycle[succ] < cycle:
+                        max_strict_pred_cycle[succ] = cycle
+                    if strict_pred_count[succ] == 0 and weak_pred_count[succ] == 0:
+                        heapq.heappush(ready_heap, succ)
+
+                for succ in weak_succs[i]:
+                    weak_pred_count[succ] -= 1
+                    if max_weak_pred_cycle[succ] < cycle:
+                        max_weak_pred_cycle[succ] = cycle
+                    if strict_pred_count[succ] == 0 and weak_pred_count[succ] == 0:
+                        heapq.heappush(ready_heap, succ)
+
+            if not scheduled_any:
+                raise RuntimeError("VLIW scheduler deadlock (no schedulable ops)")
+
+            instrs.append(bundle)
+            cycle += 1
+
+            if deferred:
+                heapq.heapify(deferred)
+                ready_heap = deferred
+            else:
+                ready_heap = []
+
+        return instrs
+
     def build(self, slots: list[tuple[Engine, tuple]], vliw: bool = False):
         # Simple slot packing that just uses one slot per instruction bundle
         if not vliw:
@@ -146,33 +269,25 @@ class KernelBuilder:
                 instrs.append({engine: [slot]})
             return instrs
 
+        if not self.emit_debug:
+            slots = [(engine, slot) for engine, slot in slots if engine != "debug"]
+
         instrs = []
-        current = {}
-        current_reads = set()
-        current_writes = set()
-
-        def flush():
-            nonlocal current, current_reads, current_writes
-            if current:
-                instrs.append(current)
-                current = {}
-                current_reads = set()
-                current_writes = set()
-
+        segment = []
         for engine, slot in slots:
-            reads, writes = self._slot_reads_writes(engine, slot)
-            if len(current.get(engine, [])) >= SLOT_LIMITS[engine]:
-                flush()
-            if reads & current_writes or writes & current_writes:
-                flush()
-            current.setdefault(engine, []).append(slot)
-            current_reads.update(reads)
-            current_writes.update(writes)
+            if self._is_barrier(engine, slot):
+                instrs.extend(self._schedule_vliw(segment))
+                segment = []
+                instrs.append({engine: [slot]})
+            else:
+                segment.append((engine, slot))
 
-        flush()
+        instrs.extend(self._schedule_vliw(segment))
         return instrs
 
     def add(self, engine, slot):
+        if engine == "debug" and not self.emit_debug:
+            return
         self.instrs.append({engine: [slot]})
 
     def alloc_scratch(self, name=None, length=1):

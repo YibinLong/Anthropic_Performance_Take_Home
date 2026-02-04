@@ -37,6 +37,57 @@ from problem import (
 )
 
 
+def analyze_utilization(instrs, slot_limits=SLOT_LIMITS, include_debug=False):
+    engines = [engine for engine in slot_limits if engine != "debug"]
+    totals = {engine: 0 for engine in engines}
+    mins = {engine: None for engine in engines}
+    maxs = {engine: 0 for engine in engines}
+    cycle_count = 0
+
+    for instr in instrs:
+        has_non_debug = any(name != "debug" for name in instr.keys())
+        if not has_non_debug and not include_debug:
+            continue
+        cycle_count += 1
+        for engine in engines:
+            count = len(instr.get(engine, []))
+            totals[engine] += count
+            if mins[engine] is None or count < mins[engine]:
+                mins[engine] = count
+            if count > maxs[engine]:
+                maxs[engine] = count
+
+    stats = {"cycle_count": cycle_count, "engines": {}}
+    for engine in engines:
+        avg = totals[engine] / cycle_count if cycle_count else 0
+        util_pct = (avg / slot_limits[engine] * 100) if cycle_count else 0
+        stats["engines"][engine] = {
+            "total": totals[engine],
+            "avg": avg,
+            "min": mins[engine] if mins[engine] is not None else 0,
+            "max": maxs[engine],
+            "util_pct": util_pct,
+            "limit": slot_limits[engine],
+        }
+    return stats
+
+
+def format_utilization(stats):
+    lines = [f"Slot utilization over {stats['cycle_count']} cycles:"]
+    for engine in (engine for engine in SLOT_LIMITS if engine != "debug"):
+        data = stats["engines"][engine]
+        lines.append(
+            f"{engine}: avg {data['avg']:.2f}/{data['limit']} "
+            f"({data['util_pct']:.1f}%), min {data['min']}, max {data['max']}"
+        )
+    return "\n".join(lines)
+
+
+def print_utilization(instrs, include_debug=False):
+    stats = analyze_utilization(instrs, include_debug=include_debug)
+    print(format_utilization(stats))
+
+
 class KernelBuilder:
     def __init__(self, emit_debug: bool = False):
         self.instrs = []
@@ -685,6 +736,7 @@ def do_kernel_test(
     seed: int = 123,
     trace: bool = False,
     prints: bool = False,
+    utilization: bool = False,
 ):
     print(f"{forest_height=}, {rounds=}, {batch_size=}")
     random.seed(seed)
@@ -695,6 +747,8 @@ def do_kernel_test(
     kb = KernelBuilder()
     kb.build_kernel(forest.height, len(forest.values), len(inp.indices), rounds)
     # print(kb.instrs)
+    if utilization:
+        print_utilization(kb.instrs)
 
     value_trace = {}
     machine = Machine(

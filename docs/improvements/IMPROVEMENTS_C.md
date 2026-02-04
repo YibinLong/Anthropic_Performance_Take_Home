@@ -82,7 +82,7 @@ Citation key: `(A#)` points to item `#` in `IMPROVEMENTS_A.md`, and `(B#)` point
    - **Pitfalls:** Requires careful tracking to avoid accidental clobbering in the scheduler.
    - **Status:** Reused `vec_addr`/`vec_node_val` as hash temporaries per group.
 
-- [ ] **12. Slot utilization diagnostics (A14, B17)**
+- [x] **12. Slot utilization diagnostics (A14, B17)**
    - **Why it matters:** Helps you see which engines are underutilized and guides pipelining depth.
    - **What to do:** Post-process `trace.json` or inspect bundles to compute average slots used.
 

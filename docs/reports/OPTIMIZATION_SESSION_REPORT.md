@@ -6,7 +6,7 @@
 |--------|--------|-------|-------|
 | Cycle count | 2177 | 2123 | -54 (-2.5%) |
 | Speedup over baseline | 67.9x | 69.6x | +1.7x |
-| Load utilization | 96.8% | 99.1% | +2.3% |
+| Load utilization | 96.8% | 99.2% | +2.4% |
 | Zero-load cycles | 60 | 16 | -44 |
 | Single-load cycles | 31 | 1 | -30 |
 | Tests passing | 3/9 | 4/9 | +1 |
@@ -87,7 +87,7 @@ The kernel performs a parallel tree traversal: 256 batch elements Ã— 16 rounds Ã
 
 **Change:** Added backward pass to compute longest path from each op to any terminal, used as primary sort key in the ready heap.
 
-**Result:** No cycle improvement. The scheduler was already achieving near-optimal packing because the load engine is saturated at 99.1%.
+**Result:** No cycle improvement. The scheduler was already achieving near-optimal packing because the load engine is saturated at 99.2%.
 
 **Lesson for future agents:** When one engine is the clear bottleneck (>97% utilization), scheduler heuristic changes have minimal impact. The scheduler's job is to fill idle slots on non-bottleneck engines, and when the bottleneck is near-saturated, the schedule is essentially forced. Save scheduler work for situations with more slack.
 
@@ -100,7 +100,7 @@ The kernel performs a parallel tree traversal: 256 batch elements Ã— 16 rounds Ã
 | Different interleave groups (4-32) | 0 cycles (4 was worse) | Load bottleneck forces the schedule regardless of group count |
 | Hash simplification without merged header | +1 cycle (worse) | Fewer VALU ops changed scheduling slightly for the worse |
 | Splitting pair+combine VALU ops | 0 cycles | Scheduler already packs them optimally |
-| Critical-path scheduling | 0 cycles | 99.1% load utilization leaves no room for scheduling improvement |
+| Critical-path scheduling | 0 cycles | 99.2% load utilization leaves no room for scheduling improvement |
 | Cross-round interleaving analysis | N/A (not needed) | Scheduler already achieves 0 zero-load cycles between rounds |
 
 ---
@@ -108,14 +108,14 @@ The kernel performs a parallel tree traversal: 256 batch elements Ã— 16 rounds Ã
 ## Current Bottleneck Analysis
 
 ```
-Load utilization:  99.1% (2 loads/cycle, 4214 total loads over 2123 cycles)
-VALU utilization:  88.5%
+Load utilization:  99.2% (2 loads/cycle, 4213 total loads over 2123 cycles)
+VALU utilization:  76.5%
 ALU utilization:    0.5%
 Store utilization:  1.5%
 Flow utilization:   0.0%
 ```
 
-The kernel is **load-bound**. Every cycle except the final 16 uses both load slots. The 16 trailing zero-load cycles are pipeline drain for the last round's hash chain and epilogue stores.
+The kernel is **load-bound**. Every cycle except the final 16 zero-load cycles and a single 1-load cycle uses both load slots. The 16 trailing zero-load cycles are pipeline drain for the last round's hash chain and epilogue stores.
 
 ### Cycle Breakdown
 
@@ -132,10 +132,10 @@ The kernel is **load-bound**. Every cycle except the final 16 uses both load slo
 | Gather `load_offset` | 4096 | 2048 |
 | Prelude `vload` | 64 | 32 |
 | Offset `const` | 32 | 16 |
-| Header `const` + `load` | ~20 | ~10 |
-| **Total** | **~4212** | **~2106** |
+| Header `const` + `load` | ~21 | ~11 |
+| **Total** | **~4213** | **~2107** |
 
-Current overhead above theoretical: 2123 - 2106 = **17 cycles** (pipeline drain + 1 unpaired load at the end).
+Current overhead above theoretical: 2123 - 2107 = **16 cycles** (pipeline drain + 1 unpaired load at the end).
 
 ---
 

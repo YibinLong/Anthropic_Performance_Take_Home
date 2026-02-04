@@ -540,7 +540,9 @@ class KernelBuilder:
                 header.append(("load", ("const", addr, val)))
             return self.const_map[val]
 
+        zero_const = header_scratch_const(0)
         one_const = header_scratch_const(1)
+        two_const = header_scratch_const(2)
 
         vec_const_map = {}
 
@@ -553,8 +555,10 @@ class KernelBuilder:
             vec_const_map[val] = addr
             return addr
 
+        vec_zero = alloc_vec_const(0, "vec_zero")
         vec_one = alloc_vec_const(1, "vec_one")
         vec_two = alloc_vec_const(2, "vec_two")
+        vec_three = alloc_vec_const(3, "vec_three")
 
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
             alloc_vec_const(val1, f"hash_c1_{hi}")
@@ -579,6 +583,47 @@ class KernelBuilder:
         header.append(("valu", ("vbroadcast", vec_n_nodes, self.scratch["n_nodes"])))
         vec_forest_base = self.alloc_scratch("vec_forest_base", VLEN)
         header.append(("valu", ("vbroadcast", vec_forest_base, self.scratch["forest_values_p"])))
+        node0 = self.alloc_scratch("node0")
+        node1 = self.alloc_scratch("node1")
+        node2 = self.alloc_scratch("node2")
+        node3 = self.alloc_scratch("node3")
+        node4 = self.alloc_scratch("node4")
+        node5 = self.alloc_scratch("node5")
+        node6 = self.alloc_scratch("node6")
+        node_addrs = [self.alloc_scratch() for _ in range(6)]
+        header.append(("load", ("load", node0, self.scratch["forest_values_p"])))
+        header.append(("alu", ("+", node_addrs[0], self.scratch["forest_values_p"], one_const)))
+        header.append(("alu", ("+", node_addrs[1], self.scratch["forest_values_p"], two_const)))
+        header.append(("alu", ("+", node_addrs[2], self.scratch["forest_values_p"], header_scratch_const(3))))
+        header.append(("alu", ("+", node_addrs[3], self.scratch["forest_values_p"], header_scratch_const(4))))
+        header.append(("alu", ("+", node_addrs[4], self.scratch["forest_values_p"], header_scratch_const(5))))
+        header.append(("alu", ("+", node_addrs[5], self.scratch["forest_values_p"], header_scratch_const(6))))
+        header.append(("load", ("load", node1, node_addrs[0])))
+        header.append(("load", ("load", node2, node_addrs[1])))
+        header.append(("load", ("load", node3, node_addrs[2])))
+        header.append(("load", ("load", node4, node_addrs[3])))
+        header.append(("load", ("load", node5, node_addrs[4])))
+        header.append(("load", ("load", node6, node_addrs[5])))
+        vec_node0 = self.alloc_scratch("vec_node0", VLEN)
+        vec_node1 = self.alloc_scratch("vec_node1", VLEN)
+        vec_node2 = self.alloc_scratch("vec_node2", VLEN)
+        vec_node3 = self.alloc_scratch("vec_node3", VLEN)
+        vec_node4 = self.alloc_scratch("vec_node4", VLEN)
+        vec_node5 = self.alloc_scratch("vec_node5", VLEN)
+        vec_node6 = self.alloc_scratch("vec_node6", VLEN)
+        header.append(("valu", ("vbroadcast", vec_node0, node0)))
+        header.append(("valu", ("vbroadcast", vec_node1, node1)))
+        header.append(("valu", ("vbroadcast", vec_node2, node2)))
+        header.append(("valu", ("vbroadcast", vec_node3, node3)))
+        header.append(("valu", ("vbroadcast", vec_node4, node4)))
+        header.append(("valu", ("vbroadcast", vec_node5, node5)))
+        header.append(("valu", ("vbroadcast", vec_node6, node6)))
+        vec_node21_diff = self.alloc_scratch("vec_node_diff_2_1", VLEN)
+        vec_node43_diff = self.alloc_scratch("vec_node_diff_4_3", VLEN)
+        vec_node65_diff = self.alloc_scratch("vec_node_diff_6_5", VLEN)
+        header.append(("valu", ("-", vec_node21_diff, vec_node2, vec_node1)))
+        header.append(("valu", ("-", vec_node43_diff, vec_node4, vec_node3)))
+        header.append(("valu", ("-", vec_node65_diff, vec_node6, vec_node5)))
         idx_arr = self.alloc_scratch("idx_arr", batch_size)
         val_arr = self.alloc_scratch("val_arr", batch_size)
 
@@ -602,25 +647,27 @@ class KernelBuilder:
         tmp_addr = self.alloc_scratch("tmp_addr")
         tmp_addr_b = self.alloc_scratch("tmp_addr_b")
 
-        interleave_groups = 8
+        interleave_groups = 12
         group_regs = []
         for g in range(interleave_groups):
             group_regs.append(
                 {
                     "vec_node_val": self.alloc_scratch(f"vec_node_val_g{g}", VLEN),
                     "vec_addr": self.alloc_scratch(f"vec_addr_g{g}", VLEN),
+                    "vec_val_save": self.alloc_scratch(f"vec_val_save_g{g}", VLEN),
                 }
             )
 
         vec_count = (batch_size // VLEN) * VLEN
 
-        def emit_vector_group_ops(round, i, regs):
+        def emit_vector_group_ops(round, i, regs, depth):
             keys = [(round, i + vi, "idx") for vi in range(VLEN)]
 
             vec_idx = idx_arr + i
             vec_val = val_arr + i
             vec_node_val = regs["vec_node_val"]
             vec_addr = regs["vec_addr"]
+            vec_val_save = regs["vec_val_save"]
             vec_tmp1 = vec_addr
             vec_tmp2 = vec_node_val
 
@@ -635,27 +682,102 @@ class KernelBuilder:
                     ),
                 )
             )
-            # node_val = mem[forest_values_p + idx] (gather)
-            body.append(("valu", ("+", vec_addr, vec_forest_base, vec_idx)))
-            for offset in range(VLEN):
-                body.append(("load", ("load_offset", vec_node_val, vec_addr, offset)))
-            body.append(
-                (
-                    "debug",
+            if depth == 0:
+                body.append(("valu", ("+", vec_node_val, vec_node0, vec_zero)))
+                body.append(
                     (
-                        "vcompare",
-                        vec_node_val,
-                        [(round, i + vi, "node_val") for vi in range(VLEN)],
-                    ),
+                        "debug",
+                        (
+                            "vcompare",
+                            vec_node_val,
+                            [(round, i + vi, "node_val") for vi in range(VLEN)],
+                        ),
+                    )
                 )
-            )
-            # val = myhash(val ^ node_val)
-            body.append(("valu", ("^", vec_val, vec_val, vec_node_val)))
-            body.extend(
-                self.build_hash_vec(
-                    vec_val, vec_tmp1, vec_tmp2, round, i, vec_const_map
+                # val = myhash(val ^ node_val)
+                body.append(("valu", ("^", vec_val, vec_val, vec_node0)))
+                body.extend(
+                    self.build_hash_vec(
+                        vec_val, vec_tmp1, vec_tmp2, round, i, vec_const_map
+                    )
                 )
-            )
+            elif depth == 1:
+                # node_val = node1 + (idx - 1) * (node2 - node1)
+                body.append(("valu", ("-", vec_node_val, vec_idx, vec_one)))
+                body.append(
+                    ("valu", ("multiply_add", vec_node_val, vec_node_val, vec_node21_diff, vec_node1))
+                )
+                body.append(
+                    (
+                        "debug",
+                        (
+                            "vcompare",
+                            vec_node_val,
+                            [(round, i + vi, "node_val") for vi in range(VLEN)],
+                        ),
+                    )
+                )
+                # val = myhash(val ^ node_val)
+                body.append(("valu", ("^", vec_val, vec_val, vec_node_val)))
+                body.extend(
+                    self.build_hash_vec(
+                        vec_val, vec_tmp1, vec_tmp2, round, i, vec_const_map
+                    )
+                )
+            elif depth == 2:
+                # node_val from nodes 3..6 using idx in [3, 6]
+                body.append(("valu", ("-", vec_addr, vec_idx, vec_three)))  # path
+                body.append(("valu", ("&", vec_val_save, vec_addr, vec_one)))  # b0
+                body.append(("valu", (">>", vec_node_val, vec_addr, vec_one)))  # b1
+                body.append(
+                    ("valu", ("multiply_add", vec_addr, vec_val_save, vec_node43_diff, vec_node3))
+                )  # v01
+                body.append(
+                    ("valu", ("multiply_add", vec_val_save, vec_val_save, vec_node65_diff, vec_node5))
+                )  # v23
+                body.append(("valu", ("-", vec_val_save, vec_val_save, vec_addr)))  # diff
+                body.append(
+                    ("valu", ("multiply_add", vec_node_val, vec_node_val, vec_val_save, vec_addr))
+                )  # node_val
+                body.append(
+                    (
+                        "debug",
+                        (
+                            "vcompare",
+                            vec_node_val,
+                            [(round, i + vi, "node_val") for vi in range(VLEN)],
+                        ),
+                    )
+                )
+                # val = myhash(val ^ node_val)
+                body.append(("valu", ("^", vec_val, vec_val, vec_node_val)))
+                body.extend(
+                    self.build_hash_vec(
+                        vec_val, vec_tmp1, vec_tmp2, round, i, vec_const_map
+                    )
+                )
+            else:
+                # node_val = mem[forest_values_p + idx] (gather)
+                body.append(("valu", ("+", vec_addr, vec_forest_base, vec_idx)))
+                for offset in range(VLEN):
+                    body.append(("load", ("load_offset", vec_node_val, vec_addr, offset)))
+                body.append(
+                    (
+                        "debug",
+                        (
+                            "vcompare",
+                            vec_node_val,
+                            [(round, i + vi, "node_val") for vi in range(VLEN)],
+                        ),
+                    )
+                )
+                # val = myhash(val ^ node_val)
+                body.append(("valu", ("^", vec_val, vec_val, vec_node_val)))
+                body.extend(
+                    self.build_hash_vec(
+                        vec_val, vec_tmp1, vec_tmp2, round, i, vec_const_map
+                    )
+                )
             body.append(
                 (
                     "debug",
@@ -670,9 +792,12 @@ class KernelBuilder:
             # => branch = (val & 1) + 1
             body.append(("valu", ("&", vec_tmp1, vec_val, vec_one)))
             body.append(("valu", ("+", vec_tmp2, vec_tmp1, vec_one)))
-            body.append(
-                ("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_tmp2))
-            )
+            if depth == 0:
+                body.append(("valu", ("+", vec_idx, vec_tmp2, vec_zero)))
+            else:
+                body.append(
+                    ("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_tmp2))
+                )
             body.append(
                 (
                     "debug",
@@ -683,19 +808,31 @@ class KernelBuilder:
                     ),
                 )
             )
-            # idx = 0 if idx >= n_nodes else idx
-            body.append(("valu", ("<", vec_tmp1, vec_idx, vec_n_nodes)))
-            body.append(("valu", ("*", vec_idx, vec_idx, vec_tmp1)))
-            body.append(
-                (
-                    "debug",
+            # idx = 0 if idx >= n_nodes else idx (only needed at wrap depth)
+            if depth == forest_height:
+                body.append(("valu", ("<", vec_tmp1, vec_idx, vec_n_nodes)))
+                body.append(("valu", ("*", vec_idx, vec_idx, vec_tmp1)))
+                body.append(
                     (
-                        "vcompare",
-                        vec_idx,
-                        [(round, i + vi, "wrapped_idx") for vi in range(VLEN)],
-                    ),
+                        "debug",
+                        (
+                            "vcompare",
+                            vec_idx,
+                            [(round, i + vi, "wrapped_idx") for vi in range(VLEN)],
+                        ),
+                    )
                 )
-            )
+            else:
+                body.append(
+                    (
+                        "debug",
+                        (
+                            "vcompare",
+                            vec_idx,
+                            [(round, i + vi, "wrapped_idx") for vi in range(VLEN)],
+                        ),
+                    )
+                )
 
         # Pre-allocate offset constant scratch addresses and emit loads into body
         # so VLIW scheduler can pair them (instead of single-load cycles via self.add)
@@ -733,12 +870,13 @@ class KernelBuilder:
             body.append(("load", ("load", val_arr + i, tmp_addr_b)))
 
         for round in range(rounds):
+            depth = round % (forest_height + 1)
             for base in range(0, vec_count, VLEN * interleave_groups):
                 for g, regs in enumerate(group_regs):
                     i = base + g * VLEN
                     if i >= vec_count:
                         continue
-                    emit_vector_group_ops(round, i, regs)
+                    emit_vector_group_ops(round, i, regs, depth)
 
             for i in range(vec_count, batch_size):
                 idx_addr = idx_arr + i

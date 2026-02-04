@@ -86,7 +86,7 @@ Citation key: `(A#)` points to item `#` in `IMPROVEMENTS_A.md`, and `(B#)` point
    - **Why it matters:** Helps you see which engines are underutilized and guides pipelining depth.
    - **What to do:** Post-process `trace.json` or inspect bundles to compute average slots used.
 
-- [ ] **13. Eliminate unused header loads (A9)**
+- [x] **13. Eliminate unused header loads (A9)**
    - **Why it matters:** Removes dead loads of `rounds`, `batch_size`, `forest_height` once unrolled or looped.
    - **What to do:** Load only the headers you use (`n_nodes`, `forest_values_p`, `inp_*_p`).
    - **Pitfalls:** Small gain, but reduces scratch pressure and clutter.

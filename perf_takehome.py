@@ -442,25 +442,23 @@ class KernelBuilder:
         tmp1 = self.alloc_scratch("tmp1")
         tmp2 = self.alloc_scratch("tmp2")
         tmp3 = self.alloc_scratch("tmp3")
-        # Scratch space addresses
+        # Scratch space addresses (header indices are fixed in build_mem_image)
         init_vars = [
-            "rounds",
-            "n_nodes",
-            "batch_size",
-            "forest_height",
-            "forest_values_p",
-            "inp_indices_p",
-            "inp_values_p",
+            ("n_nodes", 1),
+            ("forest_values_p", 4),
+            ("inp_indices_p", 5),
+            ("inp_values_p", 6),
         ]
-        for v in init_vars:
-            self.alloc_scratch(v, 1)
-        for i, v in enumerate(init_vars):
-            self.add("load", ("const", tmp1, i))
-            self.add("load", ("load", self.scratch[v], tmp1))
+        for name, _ in init_vars:
+            self.alloc_scratch(name, 1)
+        for name, header_idx in init_vars:
+            self.add("load", ("const", tmp1, header_idx))
+            self.add("load", ("load", self.scratch[name], tmp1))
 
         zero_const = self.scratch_const(0)
         one_const = self.scratch_const(1)
         two_const = self.scratch_const(2)
+        batch_size_const = self.scratch_const(batch_size)
 
         vec_const_map = {}
 
@@ -629,7 +627,7 @@ class KernelBuilder:
                     "alu",
                     [
                         ("+", idx_ptr, idx_ptr_next, zero_const),
-                        ("+", val_ptr, idx_ptr_next, self.scratch["batch_size"]),
+                        ("+", val_ptr, idx_ptr_next, batch_size_const),
                     ],
                 )
             )
@@ -717,7 +715,7 @@ class KernelBuilder:
                         "alu",
                         [
                             ("+", tail_idx_ptr, tail_idx_ptr_next, zero_const),
-                            ("+", tail_val_ptr, tail_idx_ptr_next, self.scratch["batch_size"]),
+                            ("+", tail_val_ptr, tail_idx_ptr_next, batch_size_const),
                         ],
                     )
                 )

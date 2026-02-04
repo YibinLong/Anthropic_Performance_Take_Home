@@ -202,6 +202,50 @@ class KernelBuilder:
             "jump_indirect",
         }
 
+    def _slot_side_effect(self, engine: Engine, slot: tuple) -> bool:
+        if engine == "store":
+            return True
+        if engine == "flow":
+            return True
+        if engine == "debug":
+            return self.emit_debug
+        return False
+
+    def _optimize_slots(self, slots: list[tuple[Engine, tuple]]):
+        if not slots:
+            return []
+
+        live = set()
+        optimized = []
+
+        for engine, slot in reversed(slots):
+            if isinstance(slot, list):
+                kept = []
+                reads_all = set()
+                writes_all = set()
+                for subslot in slot:
+                    reads, writes = self._slot_reads_writes(engine, subslot)
+                    side_effect = self._slot_side_effect(engine, subslot)
+                    if side_effect or (writes & live):
+                        kept.append(subslot)
+                        reads_all.update(reads)
+                        writes_all.update(writes)
+                if not kept:
+                    continue
+                live.difference_update(writes_all)
+                live.update(reads_all)
+                optimized.append((engine, kept))
+            else:
+                reads, writes = self._slot_reads_writes(engine, slot)
+                side_effect = self._slot_side_effect(engine, slot)
+                if side_effect or (writes & live):
+                    live.difference_update(writes)
+                    live.update(reads)
+                    optimized.append((engine, slot))
+
+        optimized.reverse()
+        return optimized
+
     def _schedule_vliw(self, slots: list[tuple[Engine, tuple]]):
         if not slots:
             return []
@@ -342,13 +386,13 @@ class KernelBuilder:
         segment = []
         for engine, slot in slots:
             if self._is_barrier(engine, slot):
-                instrs.extend(self._schedule_vliw(segment))
+                instrs.extend(self._schedule_vliw(self._optimize_slots(segment)))
                 segment = []
                 instrs.append({engine: [slot]})
             else:
                 segment.append((engine, slot))
 
-        instrs.extend(self._schedule_vliw(segment))
+        instrs.extend(self._schedule_vliw(self._optimize_slots(segment)))
         return instrs
 
     def add(self, engine, slot):
@@ -457,8 +501,6 @@ class KernelBuilder:
 
         zero_const = self.scratch_const(0)
         one_const = self.scratch_const(1)
-        two_const = self.scratch_const(2)
-        batch_size_const = self.scratch_const(batch_size)
 
         vec_const_map = {}
 
@@ -491,6 +533,12 @@ class KernelBuilder:
         self.add("valu", ("vbroadcast", vec_n_nodes, self.scratch["n_nodes"]))
         vec_forest_base = self.alloc_scratch("vec_forest_base", VLEN)
         self.add("valu", ("vbroadcast", vec_forest_base, self.scratch["forest_values_p"]))
+        tree_cache0 = self.alloc_scratch("tree_cache0")
+        self.add("load", ("load", tree_cache0, self.scratch["forest_values_p"]))
+        vec_tree_cache0 = self.alloc_scratch("vec_tree_cache0", VLEN)
+        self.add("valu", ("vbroadcast", vec_tree_cache0, tree_cache0))
+        idx_arr = self.alloc_scratch("idx_arr", batch_size)
+        val_arr = self.alloc_scratch("val_arr", batch_size)
 
         # Pause instructions are matched up with yield statements in the reference
         # kernel to let you debug at intermediate steps. The testing harness in this
@@ -503,8 +551,6 @@ class KernelBuilder:
         body = []  # array of slots
 
         # Scalar scratch registers (tail handling)
-        tmp_idx = self.alloc_scratch("tmp_idx")
-        tmp_val = self.alloc_scratch("tmp_val")
         tmp_node_val = self.alloc_scratch("tmp_node_val")
         tmp_addr = self.alloc_scratch("tmp_addr")
 
@@ -513,40 +559,26 @@ class KernelBuilder:
         for g in range(interleave_groups):
             group_regs.append(
                 {
-                    "idx_ptr": self.alloc_scratch(f"idx_ptr_g{g}"),
-                    "val_ptr": self.alloc_scratch(f"val_ptr_g{g}"),
-                    "idx_ptr_next": self.alloc_scratch(f"idx_ptr_next_g{g}"),
-                    "vec_idx": self.alloc_scratch(f"vec_idx_g{g}", VLEN),
-                    "vec_val": self.alloc_scratch(f"vec_val_g{g}", VLEN),
                     "vec_node_val": self.alloc_scratch(f"vec_node_val_g{g}", VLEN),
                     "vec_addr": self.alloc_scratch(f"vec_addr_g{g}", VLEN),
+                    "vec_cache_tmp": self.alloc_scratch(f"vec_cache_tmp_g{g}", VLEN),
                 }
             )
 
         vec_count = (batch_size // VLEN) * VLEN
-        vec_stride = VLEN * interleave_groups
-        tail_idx_ptr = self.alloc_scratch("tail_idx_ptr")
-        tail_val_ptr = self.alloc_scratch("tail_val_ptr")
-        tail_idx_ptr_next = self.alloc_scratch("tail_idx_ptr_next")
 
         def emit_vector_group_ops(round, i, regs):
             keys = [(round, i + vi, "idx") for vi in range(VLEN)]
 
-            idx_ptr = regs["idx_ptr"]
-            val_ptr = regs["val_ptr"]
-            idx_ptr_next = regs["idx_ptr_next"]
-            vec_idx = regs["vec_idx"]
-            vec_val = regs["vec_val"]
+            vec_idx = idx_arr + i
+            vec_val = val_arr + i
             vec_node_val = regs["vec_node_val"]
             vec_addr = regs["vec_addr"]
+            vec_cache_tmp = regs["vec_cache_tmp"]
             vec_tmp1 = vec_addr
             vec_tmp2 = vec_node_val
 
-            # idx = mem[inp_indices_p + i:i+VLEN]
-            body.append(("load", ("vload", vec_idx, idx_ptr)))
             body.append(("debug", ("vcompare", vec_idx, keys)))
-            # val = mem[inp_values_p + i:i+VLEN]
-            body.append(("load", ("vload", vec_val, val_ptr)))
             body.append(
                 (
                     "debug",
@@ -561,6 +593,10 @@ class KernelBuilder:
             body.append(("valu", ("+", vec_addr, vec_forest_base, vec_idx)))
             for offset in range(VLEN):
                 body.append(("load", ("load_offset", vec_node_val, vec_addr, offset)))
+            body.append(("valu", ("==", vec_tmp1, vec_idx, vec_zero)))
+            body.append(("valu", ("-", vec_cache_tmp, vec_tree_cache0, vec_node_val)))
+            body.append(("valu", ("*", vec_cache_tmp, vec_cache_tmp, vec_tmp1)))
+            body.append(("valu", ("+", vec_node_val, vec_node_val, vec_cache_tmp)))
             body.append(
                 (
                     "debug",
@@ -592,8 +628,9 @@ class KernelBuilder:
             # => branch = (val & 1) + 1
             body.append(("valu", ("&", vec_tmp1, vec_val, vec_one)))
             body.append(("valu", ("+", vec_tmp2, vec_tmp1, vec_one)))
-            body.append(("valu", ("*", vec_idx, vec_idx, vec_two)))
-            body.append(("valu", ("+", vec_idx, vec_idx, vec_tmp2)))
+            body.append(
+                ("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_tmp2))
+            )
             body.append(
                 (
                     "debug",
@@ -617,52 +654,30 @@ class KernelBuilder:
                     ),
                 )
             )
-            body.append(("flow", ("add_imm", idx_ptr_next, idx_ptr, vec_stride)))
-            # mem[inp_indices_p + i] = idx
-            body.append(("store", ("vstore", idx_ptr, vec_idx)))
-            # mem[inp_values_p + i] = val
-            body.append(("store", ("vstore", val_ptr, vec_val)))
+
+        for base in range(0, vec_count, VLEN):
+            offset_const = self.scratch_const(base)
             body.append(
-                (
-                    "alu",
-                    [
-                        ("+", idx_ptr, idx_ptr_next, zero_const),
-                        ("+", val_ptr, idx_ptr_next, batch_size_const),
-                    ],
-                )
+                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_const))
             )
+            body.append(("load", ("vload", idx_arr + base, tmp_addr)))
+            body.append(
+                ("alu", ("+", tmp_addr, self.scratch["inp_values_p"], offset_const))
+            )
+            body.append(("load", ("vload", val_arr + base, tmp_addr)))
+
+        for i in range(vec_count, batch_size):
+            offset_const = self.scratch_const(i)
+            body.append(
+                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_const))
+            )
+            body.append(("load", ("load", idx_arr + i, tmp_addr)))
+            body.append(
+                ("alu", ("+", tmp_addr, self.scratch["inp_values_p"], offset_const))
+            )
+            body.append(("load", ("load", val_arr + i, tmp_addr)))
 
         for round in range(rounds):
-            for g, regs in enumerate(group_regs):
-                offset = g * VLEN
-                if offset == 0:
-                    body.append(
-                        (
-                            "alu",
-                            ("+", regs["idx_ptr"], self.scratch["inp_indices_p"], zero_const),
-                        )
-                    )
-                    body.append(
-                        (
-                            "alu",
-                            ("+", regs["val_ptr"], self.scratch["inp_values_p"], zero_const),
-                        )
-                    )
-                else:
-                    offset_const = self.scratch_const(offset)
-                    body.append(
-                        (
-                            "alu",
-                            ("+", regs["idx_ptr"], self.scratch["inp_indices_p"], offset_const),
-                        )
-                    )
-                    body.append(
-                        (
-                            "alu",
-                            ("+", regs["val_ptr"], self.scratch["inp_values_p"], offset_const),
-                        )
-                    )
-
             for base in range(0, vec_count, VLEN * interleave_groups):
                 for g, regs in enumerate(group_regs):
                     i = base + g * VLEN
@@ -670,55 +685,56 @@ class KernelBuilder:
                         continue
                     emit_vector_group_ops(round, i, regs)
 
-            if vec_count < batch_size:
-                vec_count_const = self.scratch_const(vec_count)
-                body.append(
-                    ("alu", ("+", tail_idx_ptr, self.scratch["inp_indices_p"], vec_count_const))
-                )
-                body.append(
-                    ("alu", ("+", tail_val_ptr, self.scratch["inp_values_p"], vec_count_const))
-                )
-
             for i in range(vec_count, batch_size):
-                # idx = mem[inp_indices_p + i]
-                body.append(("load", ("load", tmp_idx, tail_idx_ptr)))
-                body.append(("debug", ("compare", tmp_idx, (round, i, "idx"))))
-                # val = mem[inp_values_p + i]
-                body.append(("load", ("load", tmp_val, tail_val_ptr)))
-                body.append(("debug", ("compare", tmp_val, (round, i, "val"))))
+                idx_addr = idx_arr + i
+                val_addr = val_arr + i
+                body.append(("debug", ("compare", idx_addr, (round, i, "idx"))))
+                body.append(("debug", ("compare", val_addr, (round, i, "val"))))
                 # node_val = mem[forest_values_p + idx]
-                body.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], tmp_idx)))
+                body.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], idx_addr)))
                 body.append(("load", ("load", tmp_node_val, tmp_addr)))
+                body.append(("alu", ("==", tmp1, idx_addr, zero_const)))
+                body.append(("alu", ("-", tmp3, tree_cache0, tmp_node_val)))
+                body.append(("alu", ("*", tmp3, tmp3, tmp1)))
+                body.append(("alu", ("+", tmp_node_val, tmp_node_val, tmp3)))
                 body.append(("debug", ("compare", tmp_node_val, (round, i, "node_val"))))
                 # val = myhash(val ^ node_val)
-                body.append(("alu", ("^", tmp_val, tmp_val, tmp_node_val)))
-                body.extend(self.build_hash(tmp_val, tmp1, tmp2, round, i))
-                body.append(("debug", ("compare", tmp_val, (round, i, "hashed_val"))))
+                body.append(("alu", ("^", val_addr, val_addr, tmp_node_val)))
+                body.extend(self.build_hash(val_addr, tmp1, tmp2, round, i))
+                body.append(("debug", ("compare", val_addr, (round, i, "hashed_val"))))
                 # idx = 2*idx + (1 if val % 2 == 0 else 2)
                 # => branch = (val & 1) + 1
-                body.append(("alu", ("&", tmp1, tmp_val, one_const)))
+                body.append(("alu", ("&", tmp1, val_addr, one_const)))
                 body.append(("alu", ("+", tmp3, tmp1, one_const)))
-                body.append(("alu", ("*", tmp_idx, tmp_idx, two_const)))
-                body.append(("alu", ("+", tmp_idx, tmp_idx, tmp3)))
-                body.append(("debug", ("compare", tmp_idx, (round, i, "next_idx"))))
+                body.append(("alu", ("<<", idx_addr, idx_addr, one_const)))
+                body.append(("alu", ("+", idx_addr, idx_addr, tmp3)))
+                body.append(("debug", ("compare", idx_addr, (round, i, "next_idx"))))
                 # idx = 0 if idx >= n_nodes else idx
-                body.append(("alu", ("<", tmp1, tmp_idx, self.scratch["n_nodes"])))
-                body.append(("alu", ("*", tmp_idx, tmp_idx, tmp1)))
-                body.append(("debug", ("compare", tmp_idx, (round, i, "wrapped_idx"))))
-                body.append(("flow", ("add_imm", tail_idx_ptr_next, tail_idx_ptr, 1)))
-                # mem[inp_indices_p + i] = idx
-                body.append(("store", ("store", tail_idx_ptr, tmp_idx)))
-                # mem[inp_values_p + i] = val
-                body.append(("store", ("store", tail_val_ptr, tmp_val)))
-                body.append(
-                    (
-                        "alu",
-                        [
-                            ("+", tail_idx_ptr, tail_idx_ptr_next, zero_const),
-                            ("+", tail_val_ptr, tail_idx_ptr_next, batch_size_const),
-                        ],
-                    )
-                )
+                body.append(("alu", ("<", tmp1, idx_addr, self.scratch["n_nodes"])))
+                body.append(("alu", ("*", idx_addr, idx_addr, tmp1)))
+                body.append(("debug", ("compare", idx_addr, (round, i, "wrapped_idx"))))
+
+        for base in range(0, vec_count, VLEN):
+            offset_const = self.scratch_const(base)
+            body.append(
+                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_const))
+            )
+            body.append(("store", ("vstore", tmp_addr, idx_arr + base)))
+            body.append(
+                ("alu", ("+", tmp_addr, self.scratch["inp_values_p"], offset_const))
+            )
+            body.append(("store", ("vstore", tmp_addr, val_arr + base)))
+
+        for i in range(vec_count, batch_size):
+            offset_const = self.scratch_const(i)
+            body.append(
+                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_const))
+            )
+            body.append(("store", ("store", tmp_addr, idx_arr + i)))
+            body.append(
+                ("alu", ("+", tmp_addr, self.scratch["inp_values_p"], offset_const))
+            )
+            body.append(("store", ("store", tmp_addr, val_arr + i)))
 
         body_instrs = self.build(body, vliw=True)
         self.instrs.extend(body_instrs)

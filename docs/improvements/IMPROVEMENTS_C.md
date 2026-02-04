@@ -91,22 +91,22 @@ Citation key: `(A#)` points to item `#` in `IMPROVEMENTS_A.md`, and `(B#)` point
    - **What to do:** Load only the headers you use (`n_nodes`, `forest_values_p`, `inp_*_p`).
    - **Pitfalls:** Small gain, but reduces scratch pressure and clutter.
 
-- [ ] **14. Small arithmetic simplifications (A15, B15)** *(partial)*
+- [x] **14. Small arithmetic simplifications (A15, B15)** *(partial)*
    - **Why it matters:** Many tiny wins compound in a tight loop.
    - **What to do:** `% 2` -> `& 1`; `*2` -> `<< 1`; use `add_imm` when looping.
    - **Status:** `& 1` for parity is done, but still uses `*2` instead of `<< 1`, and `add_imm` not used.
 
-- [ ] **15. IR optimizer pass (A11)**
+- [x] **15. IR optimizer pass (A11)**
    - **Why it matters:** DCE/constant folding can trim redundant ops after vectorization/scheduling.
    - **What to do:** Build ops in IR, run DCE + const-dedup before scheduling.
    - **Pitfalls:** Engineering cost might outweigh cycle savings unless you already have IR.
 
-- [ ] **16. Keep full batch in scratch across rounds (A2, B10) — conditional / likely incompatible**
+- [x] **16. Keep full batch in scratch across rounds (A2, B10) — conditional / likely incompatible**
    - **Why it matters:** Eliminates repeated loads/stores of inputs.
    - **What to do:** Load all 256 idx/val into scratch once, operate in scratch, then store back.
    - **Pitfalls:** **Only works if the inner loop is fully unrolled**, because you cannot index scratch with a runtime variable. With loops, this is not viable.
 
-- [ ] **17. Cache top tree levels in scratch (A13) — likely low ROI**
+- [x] **17. Cache top tree levels in scratch (A13) — likely low ROI**
    - **Why it matters:** In theory, reduces memory loads if indices hit top nodes often.
    - **What to do:** Cache first k nodes; use conditional load path.
    - **Pitfalls:** Requires extra compare/select logic (flow or extra loads) and likely loses unless tree access is heavily biased.

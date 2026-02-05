@@ -89,13 +89,22 @@ def print_utilization(instrs, include_debug=False):
 
 
 class KernelBuilder:
-    def __init__(self, emit_debug: bool = False):
+    def __init__(
+        self,
+        emit_debug: bool = False,
+        interleave_groups: int = 26,
+        interleave_groups_early: int | None = None,
+    ):
         self.instrs = []
         self.scratch = {}
         self.scratch_debug = {}
         self.scratch_ptr = 0
         self.const_map = {}
         self.emit_debug = emit_debug
+        self.interleave_groups = interleave_groups
+        self.interleave_groups_early = (
+            interleave_groups if interleave_groups_early is None else interleave_groups_early
+        )
 
     def debug_info(self):
         return DebugInfo(scratch_map=self.scratch_debug)
@@ -647,9 +656,11 @@ class KernelBuilder:
         tmp_addr = self.alloc_scratch("tmp_addr")
         tmp_addr_b = self.alloc_scratch("tmp_addr_b")
 
-        interleave_groups = 12
+        interleave_groups = self.interleave_groups
+        interleave_groups_early = self.interleave_groups_early
+        max_groups = max(interleave_groups, interleave_groups_early)
         group_regs = []
-        for g in range(interleave_groups):
+        for g in range(max_groups):
             group_regs.append(
                 {
                     "vec_node_val": self.alloc_scratch(f"vec_node_val_g{g}", VLEN),
@@ -683,13 +694,12 @@ class KernelBuilder:
                 )
             )
             if depth == 0:
-                body.append(("valu", ("+", vec_node_val, vec_node0, vec_zero)))
                 body.append(
                     (
                         "debug",
                         (
                             "vcompare",
-                            vec_node_val,
+                            vec_node0,
                             [(round, i + vi, "node_val") for vi in range(VLEN)],
                         ),
                     )
@@ -871,8 +881,13 @@ class KernelBuilder:
 
         for round in range(rounds):
             depth = round % (forest_height + 1)
-            for base in range(0, vec_count, VLEN * interleave_groups):
-                for g, regs in enumerate(group_regs):
+            regs_list = (
+                group_regs[:interleave_groups_early]
+                if depth <= 2
+                else group_regs[:interleave_groups]
+            )
+            for base in range(0, vec_count, VLEN * len(regs_list)):
+                for g, regs in enumerate(regs_list):
                     i = base + g * VLEN
                     if i >= vec_count:
                         continue

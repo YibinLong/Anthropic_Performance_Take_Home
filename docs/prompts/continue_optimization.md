@@ -1,0 +1,5 @@
+# Continue Optimization Prompt
+
+I want to continue work on this project. Right now a lot of work was already done, However, we still need to work more on doing more optimizations. check out @docs/reports/optimizations for summaries on the improvements that we already did. What I want you to do is to think through any further implementations and optimizations we can do. Read through the implementation right now and really scrutinize every single part of the code. You can use sub agents, as many as you need, to look through the code and really scrutinize each line piece by piece. Where can we optimize it? We wanna eke out like that much more performance. Use web search and do research on how we can improve this code further. Are there any research studies that we can do to do it to work on this? Use sub agents for this as well.
+
+After each optimization you try, run the entire test suite to see how many cycles you saved. Avoid any cycle regression. You can use the test suite as a sort of stand to check that you're going in the right direction, and to use that as a feedback loop.

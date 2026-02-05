@@ -92,8 +92,8 @@ class KernelBuilder:
     def __init__(
         self,
         emit_debug: bool = False,
-        interleave_groups: int = 26,
-        interleave_groups_early: int | None = None,
+        interleave_groups: int = 25,
+        interleave_groups_early: int | None = 26,
     ):
         self.instrs = []
         self.scratch = {}
@@ -811,11 +811,11 @@ class KernelBuilder:
             # idx = 2*idx + (1 if val % 2 == 0 else 2)
             # => branch = (val & 1) + 1
             if depth == 0:
-                body.append(("valu", ("&", vec_idx, vec_val, vec_one)))
-                body.append(("valu", ("+", vec_idx, vec_idx, vec_one)))
+                body.append(("valu", ("&", vec_tmp1, vec_val, vec_one)))
+                body.append(("flow", ("vselect", vec_idx, vec_tmp1, vec_two, vec_one)))
             else:
                 body.append(("valu", ("&", vec_tmp1, vec_val, vec_one)))
-                body.append(("valu", ("+", vec_tmp2, vec_tmp1, vec_one)))
+                body.append(("flow", ("vselect", vec_tmp2, vec_tmp1, vec_two, vec_one)))
                 body.append(
                     ("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_tmp2))
                 )

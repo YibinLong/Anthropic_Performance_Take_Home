@@ -631,14 +631,10 @@ class KernelBuilder:
         vec_node43_diff = self.alloc_scratch("vec_node_diff_4_3", VLEN)
         vec_node65_diff = self.alloc_scratch("vec_node_diff_6_5", VLEN)
         vec_node1_minus_diff = self.alloc_scratch("vec_node_1_minus_diff_21", VLEN)
-        vec_node53_diff = self.alloc_scratch("vec_node_diff_5_3", VLEN)
-        vec_node6543_diff = self.alloc_scratch("vec_node_diff_65_43", VLEN)
         header.append(("valu", ("-", vec_node21_diff, vec_node2, vec_node1)))
         header.append(("valu", ("-", vec_node43_diff, vec_node4, vec_node3)))
         header.append(("valu", ("-", vec_node65_diff, vec_node6, vec_node5)))
         header.append(("valu", ("-", vec_node1_minus_diff, vec_node1, vec_node21_diff)))
-        header.append(("valu", ("-", vec_node53_diff, vec_node5, vec_node3)))
-        header.append(("valu", ("-", vec_node6543_diff, vec_node65_diff, vec_node43_diff)))
         idx_arr = self.alloc_scratch("idx_arr", batch_size)
         val_arr = self.alloc_scratch("val_arr", batch_size)
 
@@ -748,10 +744,10 @@ class KernelBuilder:
                     ("valu", ("multiply_add", vec_addr, vec_val_save, vec_node43_diff, vec_node3))
                 )  # v01
                 body.append(
-                    ("valu", ("multiply_add", vec_val_save, vec_val_save, vec_node6543_diff, vec_node53_diff))
-                )  # diff
+                    ("valu", ("multiply_add", vec_val_save, vec_val_save, vec_node65_diff, vec_node5))
+                )  # v23
                 body.append(
-                    ("valu", ("multiply_add", vec_node_val, vec_node_val, vec_val_save, vec_addr))
+                    ("flow", ("vselect", vec_node_val, vec_node_val, vec_val_save, vec_addr))
                 )  # node_val
                 body.append(
                     (

@@ -1,4 +1,6 @@
-# Optimization Landscape Summary (for future agents)
+# Optimization Landscape Summary (for future agents) 
+
+NOTE: This is for Optimization Summaries 1-7 ONLY
 
 Purpose: provide a high-signal map of what's already been tried, what worked, what didn't, and where the remaining headroom likely is. Each bullet cites the original report so you can dive deeper.
 

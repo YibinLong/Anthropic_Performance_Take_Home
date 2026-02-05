@@ -630,9 +630,15 @@ class KernelBuilder:
         vec_node21_diff = self.alloc_scratch("vec_node_diff_2_1", VLEN)
         vec_node43_diff = self.alloc_scratch("vec_node_diff_4_3", VLEN)
         vec_node65_diff = self.alloc_scratch("vec_node_diff_6_5", VLEN)
+        vec_node1_minus_diff = self.alloc_scratch("vec_node_1_minus_diff_21", VLEN)
+        vec_node53_diff = self.alloc_scratch("vec_node_diff_5_3", VLEN)
+        vec_node6543_diff = self.alloc_scratch("vec_node_diff_65_43", VLEN)
         header.append(("valu", ("-", vec_node21_diff, vec_node2, vec_node1)))
         header.append(("valu", ("-", vec_node43_diff, vec_node4, vec_node3)))
         header.append(("valu", ("-", vec_node65_diff, vec_node6, vec_node5)))
+        header.append(("valu", ("-", vec_node1_minus_diff, vec_node1, vec_node21_diff)))
+        header.append(("valu", ("-", vec_node53_diff, vec_node5, vec_node3)))
+        header.append(("valu", ("-", vec_node6543_diff, vec_node65_diff, vec_node43_diff)))
         idx_arr = self.alloc_scratch("idx_arr", batch_size)
         val_arr = self.alloc_scratch("val_arr", batch_size)
 
@@ -713,9 +719,8 @@ class KernelBuilder:
                 )
             elif depth == 1:
                 # node_val = node1 + (idx - 1) * (node2 - node1)
-                body.append(("valu", ("-", vec_node_val, vec_idx, vec_one)))
                 body.append(
-                    ("valu", ("multiply_add", vec_node_val, vec_node_val, vec_node21_diff, vec_node1))
+                    ("valu", ("multiply_add", vec_node_val, vec_idx, vec_node21_diff, vec_node1_minus_diff))
                 )
                 body.append(
                     (
@@ -743,9 +748,8 @@ class KernelBuilder:
                     ("valu", ("multiply_add", vec_addr, vec_val_save, vec_node43_diff, vec_node3))
                 )  # v01
                 body.append(
-                    ("valu", ("multiply_add", vec_val_save, vec_val_save, vec_node65_diff, vec_node5))
-                )  # v23
-                body.append(("valu", ("-", vec_val_save, vec_val_save, vec_addr)))  # diff
+                    ("valu", ("multiply_add", vec_val_save, vec_val_save, vec_node6543_diff, vec_node53_diff))
+                )  # diff
                 body.append(
                     ("valu", ("multiply_add", vec_node_val, vec_node_val, vec_val_save, vec_addr))
                 )  # node_val
@@ -798,13 +802,20 @@ class KernelBuilder:
                     ),
                 )
             )
+            # idx update:
+            # - depth 0: idx is always 0 before update, so we can write branch directly
+            # - depth == forest_height: next round (depth 0) overwrites idx, so we can skip the update
+            if depth == forest_height and not self.emit_debug:
+                return
+
             # idx = 2*idx + (1 if val % 2 == 0 else 2)
             # => branch = (val & 1) + 1
-            body.append(("valu", ("&", vec_tmp1, vec_val, vec_one)))
-            body.append(("valu", ("+", vec_tmp2, vec_tmp1, vec_one)))
             if depth == 0:
-                body.append(("valu", ("+", vec_idx, vec_tmp2, vec_zero)))
+                body.append(("valu", ("&", vec_idx, vec_val, vec_one)))
+                body.append(("valu", ("+", vec_idx, vec_idx, vec_one)))
             else:
+                body.append(("valu", ("&", vec_tmp1, vec_val, vec_one)))
+                body.append(("valu", ("+", vec_tmp2, vec_tmp1, vec_one)))
                 body.append(
                     ("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_tmp2))
                 )
@@ -906,12 +917,20 @@ class KernelBuilder:
                 body.append(("alu", ("^", val_addr, val_addr, tmp_node_val)))
                 body.extend(self.build_hash(val_addr, tmp1, tmp2, round, i))
                 body.append(("debug", ("compare", val_addr, (round, i, "hashed_val"))))
+                # idx update
+                if depth == forest_height and not self.emit_debug:
+                    continue
+
                 # idx = 2*idx + (1 if val % 2 == 0 else 2)
                 # => branch = (val & 1) + 1
-                body.append(("alu", ("&", tmp1, val_addr, one_const)))
-                body.append(("alu", ("+", tmp3, tmp1, one_const)))
-                body.append(("alu", ("<<", idx_addr, idx_addr, one_const)))
-                body.append(("alu", ("+", idx_addr, idx_addr, tmp3)))
+                if depth == 0:
+                    body.append(("alu", ("&", idx_addr, val_addr, one_const)))
+                    body.append(("alu", ("+", idx_addr, idx_addr, one_const)))
+                else:
+                    body.append(("alu", ("&", tmp1, val_addr, one_const)))
+                    body.append(("alu", ("+", tmp3, tmp1, one_const)))
+                    body.append(("alu", ("<<", idx_addr, idx_addr, one_const)))
+                    body.append(("alu", ("+", idx_addr, idx_addr, tmp3)))
                 body.append(("debug", ("compare", idx_addr, (round, i, "next_idx"))))
                 # idx = 0 if idx >= n_nodes else idx
                 body.append(("alu", ("<", tmp1, idx_addr, self.scratch["n_nodes"])))

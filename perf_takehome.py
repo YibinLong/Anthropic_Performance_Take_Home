@@ -522,6 +522,79 @@ class KernelBuilder:
         tmp2 = self.alloc_scratch("tmp2")
         tmp3 = self.alloc_scratch("tmp3")
 
+        # Scalar fallback for non-multiple batch sizes to avoid VLIW scheduling issues.
+        if batch_size % VLEN != 0:
+            init_vars = [
+                ("n_nodes", 1),
+                ("forest_values_p", 4),
+                ("inp_indices_p", 5),
+                ("inp_values_p", 6),
+            ]
+            for name, _ in init_vars:
+                self.alloc_scratch(name, 1)
+            for name, header_idx in init_vars:
+                self.add("load", ("const", tmp1, header_idx))
+                self.add("load", ("load", self.scratch[name], tmp1))
+
+            zero_const = self.scratch_const(0)
+            one_const = self.scratch_const(1)
+            two_const = self.scratch_const(2)
+
+            if self.emit_debug:
+                self.instrs.append({"flow": [("pause",)]})
+            self.add("debug", ("comment", "Starting loop"))
+
+            tmp_idx = self.alloc_scratch("tmp_idx")
+            tmp_val = self.alloc_scratch("tmp_val")
+            tmp_node_val = self.alloc_scratch("tmp_node_val")
+            tmp_addr = self.alloc_scratch("tmp_addr")
+
+            for round in range(rounds):
+                for i in range(batch_size):
+                    i_const = self.scratch_const(i)
+                    # idx = mem[inp_indices_p + i]
+                    self.add("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], i_const))
+                    self.add("load", ("load", tmp_idx, tmp_addr))
+                    self.add("debug", ("compare", tmp_idx, (round, i, "idx")))
+                    # val = mem[inp_values_p + i]
+                    self.add("alu", ("+", tmp_addr, self.scratch["inp_values_p"], i_const))
+                    self.add("load", ("load", tmp_val, tmp_addr))
+                    self.add("debug", ("compare", tmp_val, (round, i, "val")))
+                    # node_val = mem[forest_values_p + idx]
+                    self.add("alu", ("+", tmp_addr, self.scratch["forest_values_p"], tmp_idx))
+                    self.add("load", ("load", tmp_node_val, tmp_addr))
+                    self.add("debug", ("compare", tmp_node_val, (round, i, "node_val")))
+                    # val = myhash(val ^ node_val)
+                    self.add("alu", ("^", tmp_val, tmp_val, tmp_node_val))
+                    for engine, slot in self.build_hash(tmp_val, tmp1, tmp2, round, i):
+                        if isinstance(slot, list):
+                            for subslot in slot:
+                                self.add(engine, subslot)
+                        else:
+                            self.add(engine, slot)
+                    self.add("debug", ("compare", tmp_val, (round, i, "hashed_val")))
+                    # idx = 2*idx + (1 if val % 2 == 0 else 2)
+                    self.add("alu", ("%", tmp1, tmp_val, two_const))
+                    self.add("alu", ("==", tmp1, tmp1, zero_const))
+                    self.add("flow", ("select", tmp3, tmp1, one_const, two_const))
+                    self.add("alu", ("*", tmp_idx, tmp_idx, two_const))
+                    self.add("alu", ("+", tmp_idx, tmp_idx, tmp3))
+                    self.add("debug", ("compare", tmp_idx, (round, i, "next_idx")))
+                    # idx = 0 if idx >= n_nodes else idx
+                    self.add("alu", ("<", tmp1, tmp_idx, self.scratch["n_nodes"]))
+                    self.add("flow", ("select", tmp_idx, tmp1, tmp_idx, zero_const))
+                    self.add("debug", ("compare", tmp_idx, (round, i, "wrapped_idx")))
+                    # mem[inp_indices_p + i] = idx
+                    self.add("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], i_const))
+                    self.add("store", ("store", tmp_addr, tmp_idx))
+                    # mem[inp_values_p + i] = val
+                    self.add("alu", ("+", tmp_addr, self.scratch["inp_values_p"], i_const))
+                    self.add("store", ("store", tmp_addr, tmp_val))
+
+            if self.emit_debug:
+                self.instrs.append({"flow": [("pause",)]})
+            return
+
         header = []  # collect header ops for VLIW scheduling
 
         # Scratch space addresses (header indices are fixed in build_mem_image)
@@ -672,6 +745,12 @@ class KernelBuilder:
             )
 
         vec_count = (batch_size // VLEN) * VLEN
+        use_vliw = True
+        # Avoid mixed vector+scalar scheduling hazards by using scalar-only
+        # when batch_size is not a multiple of VLEN.
+        if batch_size % VLEN != 0:
+            vec_count = 0
+            use_vliw = False
 
         def emit_vector_group_ops(round, i, regs, depth):
             keys = [(round, i + vi, "idx") for vi in range(VLEN)]
@@ -801,7 +880,9 @@ class KernelBuilder:
             # idx update:
             # - depth 0: idx is always 0 before update, so we can write branch directly
             # - depth == forest_height: next round (depth 0) overwrites idx, so we can skip the update
-            if depth == forest_height and not self.emit_debug:
+            # If this is the final round, we must still update/wrap idx for correct
+            # final outputs. Otherwise next round (depth 0) overwrites idx anyway.
+            if depth == forest_height and round != rounds - 1 and not self.emit_debug:
                 return
 
             # idx = 2*idx + (1 if val % 2 == 0 else 2)
@@ -914,7 +995,7 @@ class KernelBuilder:
                 body.extend(self.build_hash(val_addr, tmp1, tmp2, round, i))
                 body.append(("debug", ("compare", val_addr, (round, i, "hashed_val"))))
                 # idx update
-                if depth == forest_height and not self.emit_debug:
+                if depth == forest_height and round != rounds - 1 and not self.emit_debug:
                     continue
 
                 # idx = 2*idx + (1 if val % 2 == 0 else 2)
@@ -953,7 +1034,7 @@ class KernelBuilder:
             body.append(("store", ("store", tmp_addr, idx_arr + i)))
             body.append(("store", ("store", tmp_addr_b, val_arr + i)))
 
-        body_instrs = self.build(body, vliw=True)
+        body_instrs = self.build(body, vliw=use_vliw)
         self.instrs.extend(body_instrs)
         # Required to match with the yield in reference_kernel2
         if self.emit_debug:

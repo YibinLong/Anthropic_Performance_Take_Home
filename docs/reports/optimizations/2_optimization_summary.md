@@ -141,15 +141,15 @@ Current overhead above theoretical: 2123 - 2107 = **16 cycles** (pipeline drain 
 
 ## Guidance for Further Optimization (Toward < 1790)
 
-### The Fundamental Problem
+### Core Constraint
 
-The < 1790 target is BELOW the 2048-cycle minimum for 4096 gather loads at 2 loads/cycle. This means **the number of gather loads must be reduced**. No amount of scheduling improvement can bridge this gap.
+The < 1790 target is BELOW the 2048-cycle minimum for 4096 gather loads at 2 loads/cycle. This indicates **the number of gather loads should be reduced**; scheduling improvements alone are unlikely to close the full gap.
 
 ### Promising Directions
 
 **1. Tree caching in scratch memory**
 
-The tree has 1023 nodes. Scratch has 691 free words. Can't fit the full tree, but can cache the upper 9 levels (511 nodes).
+The tree has 1023 nodes. Scratch has 691 free words. A full-tree cache does not fit as-is, but the upper 9 levels (511 nodes) do fit and provide a practical caching target.
 
 After each element wraps to root (idx=0), it traverses the same upper levels deterministically. With 256 batch elements and 16 rounds, upper-level nodes are accessed thousands of times. Caching levels 0-8 in scratch and reading from scratch instead of memory would eliminate most gather loads for rounds 11-16 (after first wrap-around).
 
@@ -166,7 +166,7 @@ After each element wraps to root (idx=0), it traverses the same upper levels det
 
 Process the batch in 2 halves (128 each) using `cond_jump` for the outer loop. Each half uses 128-word idx/val arrays, freeing 256 scratch words for tree caching.
 
-**Cost:** Loop overhead (~2 cycles per iteration × 16 rounds × 2 halves = 64 cycles) plus pipeline drain per loop iteration (~16 × 32 = 512 cycles). This is much worse unless tree caching saves >500 gather loads.
+**Cost:** Loop overhead (~2 cycles per iteration × 16 rounds × 2 halves = 64 cycles) plus pipeline drain per loop iteration (~16 × 32 = 512 cycles). This path becomes attractive if tree caching can save >500 gather loads.
 
 **3. Store/reload between rounds**
 
@@ -178,21 +178,21 @@ After round 10, all batch elements wrap to idx=0 (root). For rounds 11-16, they 
 
 **5. Reduction in hash VALU pressure to improve pipeline drain**
 
-The current 16-cycle pipeline drain at the end is VALU-limited (hash chain tail). Further reducing the hash chain (already 9 ops from original 12) could shave 1-3 more cycles. Diminishing returns — max 3 cycles.
+The current 16-cycle pipeline drain at the end is VALU-limited (hash chain tail). Further reducing the hash chain (already 9 ops from original 12) is expected to recover about 1-3 additional cycles.
 
-### What NOT to Try
+### Lower-Priority Directions (Based on Current Measurements)
 
-- **More interleave groups:** Already tested 4-32, no effect
-- **Scheduler heuristic tuning:** Load utilization is 99.1%, scheduler can't help
+- **More interleave groups:** Tested 4-32; this sweep did not show additional gains
+- **Scheduler heuristic tuning:** With load utilization at 99.1%, expected gains are limited until gather count is reduced
 - **Loop for round iteration:** Creates 16 pipeline drains instead of 1
 - **Scalar processing:** Same load count as vector, worse VALU utilization
 - **Flow engine for computation:** Only 1 slot/cycle, bottleneck
 
 ### Key Numbers to Remember
 
-- 4096 gather loads = immutable floor of 2048 cycles at 2 loads/cycle
+- 4096 gather loads correspond to a 2048-cycle lower bound at 2 loads/cycle
 - 1790 target < 2048 → **must eliminate gathers**
-- 691 free scratch words < 1023 tree nodes → **can't cache full tree**
+- 691 free scratch words < 1023 tree nodes → **full-tree caching requires additional scratch-recovery techniques**
 - 512 batch words reclaimable via chunking → 691 + 256 = 947 available
 - Upper 9 tree levels = 511 nodes → fits in 947 with chunking
 

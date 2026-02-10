@@ -12,4 +12,4 @@ Read through the implementation right now and scrutinize every single line of th
 
 Implement the optimization based on the hypothesis. After the optimization you try, run the entire test suite to see how many cycles you saved. Avoid any regressions in the cycle counts.
 
-Also, after reading the optimizations and what was tried before, try to think outside the box and find radical ways to save more cycles. Those could be used to speed the project up.
+After you're done, report back to me in the chat window about what happened and if there were any cycle improvements.

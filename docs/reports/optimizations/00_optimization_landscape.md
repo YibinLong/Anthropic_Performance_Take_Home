@@ -34,7 +34,7 @@ Purpose: provide a high-signal map of what's already been tried, what worked, wh
 
 ## Bottleneck evolution (important for next moves)
 
-- **Pre-depth-aware phase:** kernel was load-bound; theoretical floor dictated by 4096 gathers at 2 loads/cycle, so rescheduling alone could not hit <1790 without reducing gathers. [source: docs/reports/optimizations/2_optimization_summary.md]
+- **Pre-depth-aware phase:** kernel was load-bound; 4096 gathers at 2 loads/cycle set a ~2048-cycle lower bound, so reaching <1790 required reducing gathers in addition to rescheduling. [source: docs/reports/optimizations/2_optimization_summary.md]
 - **Post depth-aware gather elimination:** kernel became **VALU-bound**, and interleave-group tuning became the dominant lever. [source: docs/reports/optimizations/4_optimization_summary.md]
 - **Current state:** still largely VALU-bound; flow engine is lightly used and can sometimes offload tiny pieces (branch select). [source: docs/reports/optimizations/6_optimization_summary.md]
 

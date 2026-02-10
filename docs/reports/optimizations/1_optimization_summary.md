@@ -128,7 +128,7 @@ Measured result (Task 3 report, in the then-current codebase): **~2660 cycles**.
 Quick sweep recorded in the report:
 - 4 groups: ~3425 cycles
 - 8 groups: ~2660 cycles (best)
-- 16 groups: no further improvement
+- 16 groups: matched the 8-group result in that sweep (no observed gain)
 
 ### Task 4: Hash stage pair/combine parallelism
 

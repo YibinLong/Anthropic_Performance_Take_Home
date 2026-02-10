@@ -276,6 +276,9 @@ class KernelBuilder:
         scheduler_profile: bool = False,
         scheduler_crit_weight: int = 1024,
         scheduler_engine_bias: dict[str, int] | None = None,
+        split_hash_pairs: bool = True,
+        scheduler_succ_weight: int = 512,
+        scheduler_random_seed: int | None = None,
     ):
         self.instrs = []
         self.scratch = {}
@@ -293,6 +296,9 @@ class KernelBuilder:
         self.scheduler_profile_enabled = scheduler_profile
         self.scheduler_crit_weight = scheduler_crit_weight
         self.scheduler_engine_bias = scheduler_engine_bias or {}
+        self.split_hash_pairs = split_hash_pairs
+        self.scheduler_succ_weight = scheduler_succ_weight
+        self.scheduler_random_seed = scheduler_random_seed
         self._schedule_segments = []
 
     def debug_info(self):
@@ -475,7 +481,10 @@ class KernelBuilder:
         weak_pred_count = [0] * n_ops
 
         last_write = [-1] * SCRATCH_SIZE
-        last_read = [-1] * SCRATCH_SIZE
+        # Track ALL readers since last write to correctly handle WAR deps.
+        # Using only the last reader can miss dependencies when the scheduler
+        # reorders earlier readers past a subsequent writer.
+        readers_since_write: list[list[int]] = [[] for _ in range(SCRATCH_SIZE)]
 
         for i, (_, _, reads, writes, _) in enumerate(ops):
             for addr in reads:
@@ -483,18 +492,18 @@ class KernelBuilder:
                 if lw != -1 and i not in strict_succs[lw]:
                     strict_succs[lw].add(i)
                     strict_pred_count[i] += 1
-                last_read[addr] = i
+                readers_since_write[addr].append(i)
             for addr in writes:
                 lw = last_write[addr]
                 if lw != -1 and i not in strict_succs[lw]:
                     strict_succs[lw].add(i)
                     strict_pred_count[i] += 1
-                lr = last_read[addr]
-                if lr != -1 and lr != i and i not in weak_succs[lr]:
-                    weak_succs[lr].add(i)
-                    weak_pred_count[i] += 1
+                for lr in readers_since_write[addr]:
+                    if lr != i and i not in weak_succs[lr]:
+                        weak_succs[lr].add(i)
+                        weak_pred_count[i] += 1
                 last_write[addr] = i
-                last_read[addr] = -1
+                readers_since_write[addr] = []
 
         import heapq
 
@@ -515,10 +524,17 @@ class KernelBuilder:
 
         op_priority = [0] * n_ops
         for i, (engine, _, _, _, _) in enumerate(ops):
+            succ_count = len(strict_succs[i]) + len(weak_succs[i])
             op_priority[i] = (
                 crit_path[i] * self.scheduler_crit_weight
+                + succ_count * self.scheduler_succ_weight
                 + self.scheduler_engine_bias.get(engine, 0)
             )
+
+        if self.scheduler_random_seed is not None:
+            rng = random.Random(self.scheduler_random_seed)
+            for i in range(n_ops):
+                op_priority[i] += rng.randint(0, self.scheduler_crit_weight // 4)
 
         ready_heap = []
         for i in range(n_ops):
@@ -731,15 +747,19 @@ class KernelBuilder:
                     )
                 )
             else:
-                slots.append(
-                    (
-                        "valu",
-                        [
-                            (op1, tmp1, val_hash_addr, vec_const_map[val1]),
-                            (op3, tmp2, val_hash_addr, vec_const_map[val3]),
-                        ],
+                if self.split_hash_pairs:
+                    slots.append(("valu", (op1, tmp1, val_hash_addr, vec_const_map[val1])))
+                    slots.append(("valu", (op3, tmp2, val_hash_addr, vec_const_map[val3])))
+                else:
+                    slots.append(
+                        (
+                            "valu",
+                            [
+                                (op1, tmp1, val_hash_addr, vec_const_map[val1]),
+                                (op3, tmp2, val_hash_addr, vec_const_map[val3]),
+                            ],
+                        )
                     )
-                )
                 slots.append(("valu", (op2, val_hash_addr, tmp1, tmp2)))
             slots.append(
                 (
@@ -1019,8 +1039,8 @@ class KernelBuilder:
 
         interleave_groups = self.interleave_groups
         interleave_groups_early = self.interleave_groups_early
-        max_groups = max(interleave_groups, interleave_groups_early)
         group_regs = []
+        max_groups = max(interleave_groups, interleave_groups_early)
         for g in range(max_groups):
             group_regs.append(
                 {
@@ -1383,11 +1403,12 @@ class KernelBuilder:
                 body.append(("store", ("vstore", tmp_addr, idx_arr + base)))
             if zero_base is not None:
                 body.append(("flow", ("add_imm", tmp_addr_b, self.scratch["inp_values_p"], base)))
+                body.append(("store", ("vstore", tmp_addr_b, val_arr + base)))
             else:
                 body.append(
                     ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
                 )
-            body.append(("store", ("vstore", tmp_addr_b, val_arr + base)))
+                body.append(("store", ("vstore", tmp_addr_b, val_arr + base)))
 
         for i in range(vec_count, batch_size):
             if use_idx_mem:

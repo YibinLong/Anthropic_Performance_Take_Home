@@ -269,7 +269,7 @@ class KernelBuilder:
         self,
         emit_debug: bool = False,
         interleave_groups: int = 25,
-        interleave_groups_early: int | None = 28,
+        interleave_groups_early: int | None = 29,
         depth2_select_mode: str = "flow_vselect",
         idx_branch_mode: str = "flow_vselect",
         trace_phase_tags: bool = False,
@@ -848,11 +848,17 @@ class KernelBuilder:
         # In non-debug submission mode, indices always start at zero and only
         # final values are validated, so we avoid idx memory traffic.
         use_idx_mem = self.emit_debug
+        use_compact_depth_state = (
+            not self.emit_debug and self.depth2_select_mode == "flow_vselect"
+        )
+        # Wrap checks are only required in debug mode where idx traces are validated.
+        need_wrap_checks = self.emit_debug
         init_vars = [
-            ("n_nodes", 1),
             ("forest_values_p", 4),
             ("inp_values_p", 6),
         ]
+        if need_wrap_checks:
+            init_vars.insert(0, ("n_nodes", 1))
         if use_idx_mem:
             init_vars.append(("inp_indices_p", 5))
         # Use separate tmp addresses for each header load to avoid WAW serialization
@@ -888,11 +894,14 @@ class KernelBuilder:
             vec_const_map[val] = addr
             return addr
 
-        vec_zero = alloc_vec_const(0, "vec_zero")
         vec_one = alloc_vec_const(1, "vec_one")
         vec_two = alloc_vec_const(2, "vec_two")
-        vec_three = alloc_vec_const(3, "vec_three")
-        vec_seven = alloc_vec_const(7, "vec_seven")
+        if use_compact_depth_state:
+            vec_three = None
+            vec_seven = alloc_vec_const(7, "vec_seven")
+        else:
+            vec_three = alloc_vec_const(3, "vec_three")
+            vec_seven = None
 
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
             alloc_vec_const(val1, f"hash_c1_{hi}")
@@ -913,8 +922,11 @@ class KernelBuilder:
                         )
                         vec_const_map[mul_val] = mul_const
 
-        vec_n_nodes = self.alloc_scratch("vec_n_nodes", VLEN)
-        header.append(("valu", ("vbroadcast", vec_n_nodes, self.scratch["n_nodes"])))
+        if need_wrap_checks:
+            vec_n_nodes = self.alloc_scratch("vec_n_nodes", VLEN)
+            header.append(("valu", ("vbroadcast", vec_n_nodes, self.scratch["n_nodes"])))
+        else:
+            vec_n_nodes = None
         vec_forest_base = self.alloc_scratch("vec_forest_base", VLEN)
         header.append(("valu", ("vbroadcast", vec_forest_base, self.scratch["forest_values_p"])))
         node0 = self.alloc_scratch("node0")
@@ -952,14 +964,20 @@ class KernelBuilder:
         header.append(("valu", ("vbroadcast", vec_node4, node4)))
         header.append(("valu", ("vbroadcast", vec_node5, node5)))
         header.append(("valu", ("vbroadcast", vec_node6, node6)))
-        vec_node21_diff = self.alloc_scratch("vec_node_diff_2_1", VLEN)
-        vec_node43_diff = self.alloc_scratch("vec_node_diff_4_3", VLEN)
-        vec_node65_diff = self.alloc_scratch("vec_node_diff_6_5", VLEN)
-        vec_node1_minus_diff = self.alloc_scratch("vec_node_1_minus_diff_21", VLEN)
-        header.append(("valu", ("-", vec_node21_diff, vec_node2, vec_node1)))
-        header.append(("valu", ("-", vec_node43_diff, vec_node4, vec_node3)))
-        header.append(("valu", ("-", vec_node65_diff, vec_node6, vec_node5)))
-        header.append(("valu", ("-", vec_node1_minus_diff, vec_node1, vec_node21_diff)))
+        if use_compact_depth_state:
+            vec_node21_diff = None
+            vec_node43_diff = None
+            vec_node65_diff = None
+            vec_node1_minus_diff = None
+        else:
+            vec_node21_diff = self.alloc_scratch("vec_node_diff_2_1", VLEN)
+            vec_node43_diff = self.alloc_scratch("vec_node_diff_4_3", VLEN)
+            vec_node65_diff = self.alloc_scratch("vec_node_diff_6_5", VLEN)
+            vec_node1_minus_diff = self.alloc_scratch("vec_node_1_minus_diff_21", VLEN)
+            header.append(("valu", ("-", vec_node21_diff, vec_node2, vec_node1)))
+            header.append(("valu", ("-", vec_node43_diff, vec_node4, vec_node3)))
+            header.append(("valu", ("-", vec_node65_diff, vec_node6, vec_node5)))
+            header.append(("valu", ("-", vec_node1_minus_diff, vec_node1, vec_node21_diff)))
         idx_arr = self.alloc_scratch("idx_arr", batch_size)
         val_arr = self.alloc_scratch("val_arr", batch_size)
 
@@ -1008,12 +1026,6 @@ class KernelBuilder:
         if batch_size % VLEN != 0:
             vec_count = 0
             use_vliw = False
-        # In submission mode we can carry compact path state across depths 0..2
-        # and materialize full idx only once before depth-3 gathers.
-        use_compact_depth_state = (
-            not self.emit_debug and self.depth2_select_mode == "flow_vselect"
-        )
-
         def emit_vector_group_ops(round, i, regs, depth):
             keys = [(round, i + vi, "idx") for vi in range(VLEN)]
 
@@ -1224,7 +1236,7 @@ class KernelBuilder:
                 )
             )
             # idx = 0 if idx >= n_nodes else idx (only needed at wrap depth)
-            if depth == forest_height:
+            if need_wrap_checks and depth == forest_height:
                 body.append(("valu", ("<", vec_tmp1, vec_idx, vec_n_nodes)))
                 body.append(("valu", ("*", vec_idx, vec_idx, vec_tmp1)))
                 body.append(
@@ -1328,9 +1340,10 @@ class KernelBuilder:
                     body.append(("alu", ("<<", idx_addr, idx_addr, one_const)))
                     body.append(("alu", ("+", idx_addr, idx_addr, tmp3)))
                 body.append(("debug", ("compare", idx_addr, (round, i, "next_idx"))))
-                # idx = 0 if idx >= n_nodes else idx
-                body.append(("alu", ("<", tmp1, idx_addr, self.scratch["n_nodes"])))
-                body.append(("alu", ("*", idx_addr, idx_addr, tmp1)))
+                # idx wrap is only required in debug mode where idx traces are checked.
+                if need_wrap_checks and depth == forest_height:
+                    body.append(("alu", ("<", tmp1, idx_addr, self.scratch["n_nodes"])))
+                    body.append(("alu", ("*", idx_addr, idx_addr, tmp1)))
                 body.append(("debug", ("compare", idx_addr, (round, i, "wrapped_idx"))))
 
         for base in range(0, vec_count, VLEN):

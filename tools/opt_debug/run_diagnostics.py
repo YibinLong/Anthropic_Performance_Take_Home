@@ -32,7 +32,7 @@ def run() -> None:
     parser.add_argument("--rounds", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--interleave-groups", type=int, default=25)
-    parser.add_argument("--interleave-groups-early", type=int, default=26)
+    parser.add_argument("--interleave-groups-early", type=int, default=29)
     parser.add_argument("--depth2-select-mode", choices=["flow_vselect", "alu_blend"], default="flow_vselect")
     parser.add_argument("--idx-branch-mode", choices=["flow_vselect", "alu_branch"], default="flow_vselect")
     parser.add_argument("--scheduler-crit-weight", type=int, default=1024)

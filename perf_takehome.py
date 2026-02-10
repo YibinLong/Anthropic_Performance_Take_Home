@@ -844,6 +844,11 @@ class KernelBuilder:
 
         header = []  # collect header ops for VLIW scheduling
 
+        # Allocate a never-written scratch address for use as add_imm zero source.
+        # Scratch is initialized to 0 by the Machine, so reading this always yields 0.
+        # This lets us replace load.const with flow.add_imm in submission mode.
+        zero_base = self.alloc_scratch("zero_base") if not self.emit_debug else None
+
         # Scratch space addresses (header indices are fixed in build_mem_image)
         # In non-debug submission mode, indices always start at zero and only
         # final values are validated, so we avoid idx memory traffic.
@@ -868,7 +873,10 @@ class KernelBuilder:
             header_tmp_addrs.append(self.alloc_scratch())
         for idx_i, (name, header_idx) in enumerate(init_vars):
             htmp = header_tmp_addrs[idx_i]
-            header.append(("load", ("const", htmp, header_idx)))
+            if zero_base is not None:
+                header.append(("flow", ("add_imm", htmp, zero_base, header_idx)))
+            else:
+                header.append(("load", ("const", htmp, header_idx)))
             header.append(("load", ("load", self.scratch[name], htmp)))
 
         # scratch_const replacement for header: allocate and emit to header list
@@ -876,7 +884,10 @@ class KernelBuilder:
             if val not in self.const_map:
                 addr = self.alloc_scratch(name)
                 self.const_map[val] = addr
-                header.append(("load", ("const", addr, val)))
+                if zero_base is not None:
+                    header.append(("flow", ("add_imm", addr, zero_base, val)))
+                else:
+                    header.append(("load", ("const", addr, val)))
             return self.const_map[val]
 
         zero_const = header_scratch_const(0)
@@ -1263,39 +1274,54 @@ class KernelBuilder:
 
         # Pre-allocate offset constant scratch addresses and emit loads into body
         # so VLIW scheduler can pair them (instead of single-load cycles via self.add)
+        # In submission mode (zero_base is not None), we use flow.add_imm instead,
+        # which eliminates both the scratch allocation and the load ops.
         offset_addrs = {}
-        all_offsets = set()
-        for base in range(0, vec_count, VLEN):
-            all_offsets.add(base)
-        for i in range(vec_count, batch_size):
-            all_offsets.add(i)
-        for off in sorted(all_offsets):
-            if off not in self.const_map:
-                addr = self.alloc_scratch()
-                self.const_map[off] = addr
-            offset_addrs[off] = self.const_map[off]
-            body.append(("load", ("const", offset_addrs[off], off)))
+        if zero_base is None:
+            all_offsets = set()
+            for base in range(0, vec_count, VLEN):
+                all_offsets.add(base)
+            for i in range(vec_count, batch_size):
+                all_offsets.add(i)
+            for off in sorted(all_offsets):
+                if off not in self.const_map:
+                    addr = self.alloc_scratch()
+                    self.const_map[off] = addr
+                offset_addrs[off] = self.const_map[off]
+                body.append(("load", ("const", offset_addrs[off], off)))
 
         for base in range(0, vec_count, VLEN):
             if use_idx_mem:
-                body.append(
-                    ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
-                )
+                if zero_base is not None:
+                    body.append(("flow", ("add_imm", tmp_addr, self.scratch["inp_indices_p"], base)))
+                else:
+                    body.append(
+                        ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
+                    )
                 body.append(("load", ("vload", idx_arr + base, tmp_addr)))
-            body.append(
-                ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
-            )
+            if zero_base is not None:
+                body.append(("flow", ("add_imm", tmp_addr_b, self.scratch["inp_values_p"], base)))
+            else:
+                body.append(
+                    ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
+                )
             body.append(("load", ("vload", val_arr + base, tmp_addr_b)))
 
         for i in range(vec_count, batch_size):
             if use_idx_mem:
-                body.append(
-                    ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[i]))
-                )
+                if zero_base is not None:
+                    body.append(("flow", ("add_imm", tmp_addr, self.scratch["inp_indices_p"], i)))
+                else:
+                    body.append(
+                        ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[i]))
+                    )
                 body.append(("load", ("load", idx_arr + i, tmp_addr)))
-            body.append(
-                ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[i]))
-            )
+            if zero_base is not None:
+                body.append(("flow", ("add_imm", tmp_addr_b, self.scratch["inp_values_p"], i)))
+            else:
+                body.append(
+                    ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[i]))
+                )
             body.append(("load", ("load", val_arr + i, tmp_addr_b)))
 
         for round in range(rounds):
@@ -1348,24 +1374,36 @@ class KernelBuilder:
 
         for base in range(0, vec_count, VLEN):
             if use_idx_mem:
-                body.append(
-                    ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
-                )
+                if zero_base is not None:
+                    body.append(("flow", ("add_imm", tmp_addr, self.scratch["inp_indices_p"], base)))
+                else:
+                    body.append(
+                        ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
+                    )
                 body.append(("store", ("vstore", tmp_addr, idx_arr + base)))
-            body.append(
-                ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
-            )
+            if zero_base is not None:
+                body.append(("flow", ("add_imm", tmp_addr_b, self.scratch["inp_values_p"], base)))
+            else:
+                body.append(
+                    ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
+                )
             body.append(("store", ("vstore", tmp_addr_b, val_arr + base)))
 
         for i in range(vec_count, batch_size):
             if use_idx_mem:
-                body.append(
-                    ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[i]))
-                )
+                if zero_base is not None:
+                    body.append(("flow", ("add_imm", tmp_addr, self.scratch["inp_indices_p"], i)))
+                else:
+                    body.append(
+                        ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[i]))
+                    )
                 body.append(("store", ("store", tmp_addr, idx_arr + i)))
-            body.append(
-                ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[i]))
-            )
+            if zero_base is not None:
+                body.append(("flow", ("add_imm", tmp_addr_b, self.scratch["inp_values_p"], i)))
+            else:
+                body.append(
+                    ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[i]))
+                )
             body.append(("store", ("store", tmp_addr_b, val_arr + i)))
 
         body_instrs = self.build(body, vliw=use_vliw, phase_tag=body_phase_tag)

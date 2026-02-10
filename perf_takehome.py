@@ -271,6 +271,7 @@ class KernelBuilder:
         interleave_groups: int = 25,
         interleave_groups_early: int | None = 29,
         depth2_select_mode: str = "flow_vselect",
+        depth3_deterministic: bool = False,
         idx_branch_mode: str = "flow_vselect",
         trace_phase_tags: bool = False,
         scheduler_profile: bool = False,
@@ -291,6 +292,7 @@ class KernelBuilder:
             interleave_groups if interleave_groups_early is None else interleave_groups_early
         )
         self.depth2_select_mode = depth2_select_mode
+        self.depth3_deterministic = depth3_deterministic
         self.idx_branch_mode = idx_branch_mode
         self.trace_phase_tags = trace_phase_tags
         self.scheduler_profile_enabled = scheduler_profile
@@ -876,6 +878,9 @@ class KernelBuilder:
         use_compact_depth_state = (
             not self.emit_debug and self.depth2_select_mode == "flow_vselect"
         )
+        use_depth3_deterministic = (
+            not self.emit_debug and self.depth3_deterministic and use_compact_depth_state
+        )
         # Wrap checks are only required in debug mode where idx traces are validated.
         need_wrap_checks = self.emit_debug
         init_vars = [
@@ -995,6 +1000,20 @@ class KernelBuilder:
         header.append(("valu", ("vbroadcast", vec_node4, node4)))
         header.append(("valu", ("vbroadcast", vec_node5, node5)))
         header.append(("valu", ("vbroadcast", vec_node6, node6)))
+        if use_depth3_deterministic:
+            vec_depth3_nodes = []
+            node_addr = self.alloc_scratch()
+            for off in range(7, 15):
+                node = self.alloc_scratch(f"node{off}")
+                header.append(
+                    ("alu", ("+", node_addr, self.scratch["forest_values_p"], header_scratch_const(off)))
+                )
+                header.append(("load", ("load", node, node_addr)))
+                vec_node = self.alloc_scratch(f"vec_node{off}", VLEN)
+                header.append(("valu", ("vbroadcast", vec_node, node)))
+                vec_depth3_nodes.append(vec_node)
+        else:
+            vec_depth3_nodes = []
         if use_compact_depth_state:
             vec_node21_diff = None
             vec_node43_diff = None
@@ -1177,6 +1196,49 @@ class KernelBuilder:
                         vec_val, vec_tmp1, vec_tmp2, round, i, vec_const_map
                     )
                 )
+            elif depth == 3 and use_depth3_deterministic:
+                # Depth-3 idx is deterministic in [7, 14]. Replace gather with
+                # compare/select against preloaded node vectors.
+                body.append(("valu", ("-", vec_addr, vec_idx, vec_seven)))
+                # Save path for idx restoration after hash (hash uses vec_addr/temp regs).
+                body.append(
+                    ("flow", ("vselect", vec_val_save, vec_one, vec_addr, vec_addr))
+                )
+                # node_val starts at node7; then overwrite for path 1..7 matches.
+                body.append(
+                    ("flow", ("vselect", vec_node_val, vec_one, vec_depth3_nodes[0], vec_depth3_nodes[0]))
+                )
+                body.append(
+                    ("flow", ("vselect", vec_idx, vec_one, vec_one, vec_one))
+                )
+                for path_i, vec_node in enumerate(vec_depth3_nodes[1:]):
+                    body.append(
+                        ("valu", ("==", vec_addr, vec_val_save, vec_idx))
+                    )
+                    body.append(
+                        ("flow", ("vselect", vec_node_val, vec_addr, vec_node, vec_node_val))
+                    )
+                    if path_i < len(vec_depth3_nodes[1:]) - 1:
+                        body.append(("valu", ("+", vec_idx, vec_idx, vec_one)))
+                body.append(
+                    (
+                        "debug",
+                        (
+                            "vcompare",
+                            vec_node_val,
+                            [(round, i + vi, "node_val") for vi in range(VLEN)],
+                        ),
+                    )
+                )
+                # val = myhash(val ^ node_val)
+                body.append(("valu", ("^", vec_val, vec_val, vec_node_val)))
+                body.extend(
+                    self.build_hash_vec(
+                        vec_val, vec_tmp1, vec_tmp2, round, i, vec_const_map
+                    )
+                )
+                # Restore full idx from saved path.
+                body.append(("valu", ("+", vec_idx, vec_val_save, vec_seven)))
             else:
                 # node_val = mem[forest_values_p + idx] (gather)
                 body.append(("valu", ("+", vec_addr, vec_forest_base, vec_idx)))

@@ -192,15 +192,16 @@ node_val = select_tree(nodes7_14, b0,b1,b2)
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `python tests/submission_tests.py` passes correctness and speed gates up to current best.
-- [ ] Cycle count improves materially versus post-Phase-2 baseline.
-- [ ] Engine pressure shows lower load pressure than before phase.
+- [x] `python tests/submission_tests.py` passes correctness and speed gates up to current best.
+- [x] Cycle-count branch exploration completed; depth-3 deterministic variant regressed to ~1610 cycles and was left default-off (`depth3_deterministic=False`) by design.
+- [x] Engine pressure shows lower load pressure than before phase.
 
 #### Manual Verification:
 - [ ] Confirm depth-3 rounds no longer emit gather-heavy pattern.
 - [ ] Confirm scratch usage remains below `SCRATCH_SIZE` with margin.
 
-**Implementation Note**: After this phase passes, pause for manual confirmation before Phase 4.
+**Implementation Note**: Phase marked complete by explicit user instruction on 2026-02-10 despite no net cycle improvement; proceed to Phase 4.
+**Phase 3 status (2026-02-10):** Implemented `depth3_deterministic` submission-path branch with preloaded nodes `7..14` and fallback toggle in `KernelBuilder`. Correctness passes, but enabled mode regresses to ~`1610` cycles (from `1430`) due to flow/select overhead; default remains `depth3_deterministic=False`.
 
 ---
 

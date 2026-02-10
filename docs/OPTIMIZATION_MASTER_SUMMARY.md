@@ -41,16 +41,16 @@ We are optimizing a **VLIW SIMD kernel** that performs parallel tree traversal o
 
 | Metric | Value |
 |--------|-------|
-| **Cycle count** | **1446** |
-| **Speedup** | **102.17x** over baseline |
+| **Cycle count** | **1407** |
+| **Speedup** | **104.999x** over baseline |
 | **Tests passing** | **8/9** |
-| **Only failing test** | `test_opus45_improved_harness` (requires < 1363, need 83 more cycles) |
+| **Only failing test** | `test_opus45_improved_harness` (requires < 1363, need 44 more cycles) |
 
 **Current bottlenecks (from diagnostics):**
-- `valu`: **92.5%** utilization (near saturation)
-- `load`: **91.7%** utilization (near saturation)
-- `flow`: saturated **35.4%** of cycles (1 slot/cycle limit)
-- `alu`: low utilization (~10-15%), mostly idle
+- `valu`: **94.4%** utilization (near saturation)
+- `load`: **92.4%** utilization (near saturation)
+- `flow`: active on **24.3%** of cycles
+- `alu`: near-zero utilization in current run (~0%), mostly idle
 - `store`: low utilization
 
 ---
@@ -160,7 +160,9 @@ KernelBuilder(
     interleave_groups_early=29, # Groups for depths 0-2 (no gathers)
     depth2_select_mode="flow_vselect",  # Depth-2 node selection
     idx_branch_mode="flow_vselect",     # Branch decision mode
-    scheduler_crit_weight=1024,         # Scheduler priority weight
+    scheduler_crit_weight=136,          # Scheduler priority weight
+    scheduler_succ_weight=3584,         # Successor-unblock weight
+    scheduler_random_seed=51,           # Deterministic tie-breaking seed
 )
 ```
 
@@ -170,7 +172,7 @@ KernelBuilder(
    - **Depth 0:** XOR with preloaded root (vec_node0), hash, store branch bit
    - **Depth 1:** Select node1/node2 via compact path bit, hash
    - **Depth 2:** 4-way select from nodes 3-6 via compact path bits + vselect, hash
-   - **Depth 3+:** Memory gather via `load_offset`, hash, full idx update
+   - **Depth 3+:** Memory gather via `load_offset`, hash, compact path update (`path = 2*path + bit`) in submission mode
    - Final depth: skip idx update (dead in submission mode)
 3. **Epilogue** — Store values back to memory
 
@@ -179,16 +181,22 @@ KernelBuilder(
 - Skip n_nodes loading
 - Skip wrap checks
 - Use compact state for depths 0-2
+- Use compact path state for depths 3+ (submission-only mode in current best config)
 - Skip idx update at forest_height and final round
 
 ---
 
 ## Remaining Target
 
-**Need: < 1363 cycles (currently 1446, gap = 83 cycles)**
+**Need: < 1363 cycles (currently 1407, gap = 44 cycles)**
 
 ### Theoretical Lower Bound Analysis
-From Opt 3 report: minimum ~1334 cycles based on load requirements alone. This means the gap to theoretical minimum is ~112 cycles. The target of 1363 is only 29 cycles above theoretical minimum.
+Current measured lower bounds from op counts:
+- VALU min: ~1327.8 cycles
+- Load min: ~1300.5 cycles
+- Flow min: ~342 cycles
+
+Current overhead above VALU minimum is ~79.2 cycles (1407 - 1327.8), leaving room for additional packing and/or work elimination.
 
 ### Most Promising Unexplored Directions
 
@@ -227,7 +235,7 @@ From Opt 3 report: minimum ~1334 cycles based on load requirements alone. This m
 - Address precompute/reuse across rounds
 - Root node caching with conditional blend
 - Interleave groups >= 30 (scratch overflow/correctness issues)
-- Pure parameter sweeps (exhaustively searched, local optimum confirmed)
+- Beam scheduling and multi-start seeds as defaults (`beam_width>=2` and multi-starts were consistently worse in this codebase state)
 
 ---
 
@@ -262,9 +270,11 @@ python perf_takehome.py Tests.test_kernel_cycles  # with diagnostics_out set
 
 ---
 
-*Last updated: 2026-02-10 | Current best: 1430 cycles | Target: < 1363 cycles*
+*Last updated: 2026-02-10 | Current best: 1407 cycles | Target: < 1363 cycles*
 
-## 2026-02-10 Aggressive Follow-Up (1430 Baseline)
+## 2026-02-10 Aggressive Follow-Up (1430 Baseline, Historical Snapshot)
+
+This section captures the state before the compact depth3+ path and scheduler retune that reached 1407.
 
 ### Dominant Configuration (kept)
 - `depth4_mode="off"` (depth-4 deterministic path is available but default-disabled)
@@ -288,3 +298,62 @@ python perf_takehome.py Tests.test_kernel_cycles  # with diagnostics_out set
 - Randomized combined search with acceptance gate:
   - `python tools/opt_debug/auto_optimize.py --backend random --trials 30 --seed 123 --out-dir docs/reports/optimizations/phase6_queue --accept-if-better-than 1430`
   - Result: `accepted_winner=false` (no candidate below 1430).
+
+## 2026-02-10 High-Signal Experiment Log (1430 -> 1407)
+
+### Goal
+- Push the stable submission configuration from `1430` lower without correctness regressions.
+
+### What Worked
+- **Submission-path compact path state for depth 3+**
+  - Net: `1430 -> 1427` (improvement).
+  - Code points:
+    - Mode gate: `perf_takehome.py:974`
+    - Per-depth base vectors: `perf_takehome.py:1068`
+    - Depth 3+ gather with compact path: `perf_takehome.py:1443`
+    - Depth-2/3+ compact update path: `perf_takehome.py:1500`
+  - Why it helped:
+    - Eliminated depth 3+ `flow.vselect` branch-update usage in submission mode.
+    - Reduced flow pressure and total ops in the hot loop.
+
+- **Scheduler retuning after the structural change**
+  - Net: `1427 -> 1407` (improvement).
+  - Winning default tuple:
+    - `scheduler_crit_weight=136`
+    - `scheduler_succ_weight=3584`
+    - `scheduler_random_seed=51`
+    - `scheduler_beam_width=1`
+  - Why it helped:
+    - The compact-path DAG changed dependency geometry enough that a different priority balance produced tighter schedules.
+
+### What Did Not Improve (This Round)
+- **Scheduler local compaction post-pass**
+  - A safe “pull ops earlier” pass was implemented and tested.
+  - Result: no cycle gain over baseline scheduler on this kernel shape.
+  - Action: removed to keep scheduler simple.
+
+- **Beam width > 1**
+  - Consistently worse than `beam_width=1` in this codebase state.
+  - Kept as optional knob, not used in defaults.
+
+- **Multi-start seed mode as default**
+  - Added overhead and did not outperform best deterministic single-seed defaults for stable submission config.
+
+- **Interleave retunes with current kernel shape**
+  - Additional sweeps around `(interleave_groups=25, interleave_groups_early=29)` did not beat the new 1407 default.
+
+### Validation Protocol Used
+- Guardrail:
+  - `git diff origin/main tests/` must be empty.
+- Correctness + official score:
+  - `python tests/submission_tests.py`
+  - Result on current best: `CYCLES: 1407`, correctness pass, speed thresholds pass except `<1363`.
+- Local sanity:
+  - `python perf_takehome.py` (all local tests pass; debug trace path remains functional).
+
+### Future-Agent Notes (Actionable)
+- Preserve the compact depth3+ path mechanism; it is a real structural win.
+- Treat scheduler tuning as coupled to DAG shape; when structure changes, re-sweep scheduler weights/seeds.
+- Prioritize experiments that either:
+  - reduce VALU op count in depth 3+ rounds, or
+  - reduce load-engine occupancy without increasing VALU beyond saturation.

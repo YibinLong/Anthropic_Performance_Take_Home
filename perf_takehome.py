@@ -277,11 +277,11 @@ class KernelBuilder:
         idx_branch_mode: str = "flow_vselect",
         trace_phase_tags: bool = False,
         scheduler_profile: bool = False,
-        scheduler_crit_weight: int = 1024,
+        scheduler_crit_weight: int = 136,
         scheduler_engine_bias: dict[str, int] | None = None,
         split_hash_pairs: bool = True,
-        scheduler_succ_weight: int = 512,
-        scheduler_random_seed: int | None = None,
+        scheduler_succ_weight: int = 3584,
+        scheduler_random_seed: int | None = 51,
         scheduler_multi_start_seeds: tuple[int, ...] | list[int] | None = None,
         scheduler_beam_width: int = 1,
     ):
@@ -971,6 +971,14 @@ class KernelBuilder:
             and self.depth4_mode == "deterministic16"
             and use_compact_depth_state
         )
+        # Submission-only mode: keep path state beyond depth-2 to avoid
+        # depth>=3 flow.vselect branch updates. Disabled when deterministic
+        # depth branches are active because those branches expect full idx.
+        use_compact_path_depth3plus = (
+            use_compact_depth_state
+            and not use_depth3_deterministic
+            and not use_depth4_deterministic
+        )
         # Wrap checks are only required in debug mode where idx traces are validated.
         need_wrap_checks = self.emit_debug
         init_vars = [
@@ -1057,6 +1065,43 @@ class KernelBuilder:
             vec_n_nodes = None
         vec_forest_base = self.alloc_scratch("vec_forest_base", VLEN)
         header.append(("valu", ("vbroadcast", vec_forest_base, self.scratch["forest_values_p"])))
+        vec_forest_depth_bases = {}
+        if use_compact_path_depth3plus:
+            required_depths = sorted(
+                {
+                    round_i % (forest_height + 1)
+                    for round_i in range(rounds)
+                    if (round_i % (forest_height + 1)) >= 3
+                }
+            )
+            if required_depths:
+                # Recurrence for absolute depth bases:
+                # base_{d+1} = 2*base_d + (1 - forest_base), with base_3=forest_base+7.
+                # This avoids extra flow.add_imm + vbroadcast pairs per depth.
+                vec_forest_base_adj = self.alloc_scratch("vec_forest_base_adj", VLEN)
+                header.append(("valu", ("-", vec_forest_base_adj, vec_one, vec_forest_base)))
+                max_depth = required_depths[-1]
+                base_vec = self.alloc_scratch("vec_forest_base_d3", VLEN)
+                header.append(("valu", ("+", base_vec, vec_forest_base, vec_seven)))
+                if 3 in required_depths:
+                    vec_forest_depth_bases[3] = base_vec
+                for depth in range(4, max_depth + 1):
+                    next_base_vec = self.alloc_scratch(f"vec_forest_base_d{depth}", VLEN)
+                    header.append(
+                        (
+                            "valu",
+                            (
+                                "multiply_add",
+                                next_base_vec,
+                                base_vec,
+                                vec_two,
+                                vec_forest_base_adj,
+                            ),
+                        )
+                    )
+                    base_vec = next_base_vec
+                    if depth in required_depths:
+                        vec_forest_depth_bases[depth] = base_vec
         node0 = self.alloc_scratch("node0")
         node1 = self.alloc_scratch("node1")
         node2 = self.alloc_scratch("node2")
@@ -1395,7 +1440,15 @@ class KernelBuilder:
                 body.append(("valu", ("+", vec_idx, vec_val_save, vec_fifteen)))
             else:
                 # node_val = mem[forest_values_p + idx] (gather)
-                body.append(("valu", ("+", vec_addr, vec_forest_base, vec_idx)))
+                if use_compact_path_depth3plus and depth >= 3:
+                    body.append(
+                        (
+                            "valu",
+                            ("+", vec_addr, vec_forest_depth_bases[depth], vec_idx),
+                        )
+                    )
+                else:
+                    body.append(("valu", ("+", vec_addr, vec_forest_base, vec_idx)))
                 for offset in range(VLEN):
                     body.append(("load", ("load_offset", vec_node_val, vec_addr, offset)))
                 body.append(
@@ -1445,10 +1498,23 @@ class KernelBuilder:
                 return
 
             if use_compact_depth_state and depth == 2:
-                # Materialize idx for depth-3: idx = 7 + 2*path + b2.
-                body.append(("valu", ("&", vec_addr, vec_val, vec_one)))
-                body.append(("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_seven)))
-                body.append(("valu", ("+", vec_idx, vec_idx, vec_addr)))
+                if use_compact_path_depth3plus:
+                    # Keep path state for depth-3+: path = 2*path + b2.
+                    body.append(("valu", ("&", vec_addr, vec_val, vec_one)))
+                    body.append(("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_addr)))
+                else:
+                    # Materialize idx for depth-3: idx = 7 + 2*path + b2.
+                    body.append(("valu", ("&", vec_addr, vec_val, vec_one)))
+                    body.append(("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_seven)))
+                    body.append(("valu", ("+", vec_idx, vec_idx, vec_addr)))
+                return
+
+            if use_compact_path_depth3plus and depth >= 3:
+                # For depth>=3, vec_idx carries path and updates as path'=2*path+b.
+                body.append(("valu", ("&", vec_tmp1, vec_val, vec_one)))
+                body.append(
+                    ("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_tmp1))
+                )
                 return
 
             # idx = 2*idx + (1 if val % 2 == 0 else 2)

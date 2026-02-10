@@ -269,7 +269,7 @@ class KernelBuilder:
         self,
         emit_debug: bool = False,
         interleave_groups: int = 25,
-        interleave_groups_early: int | None = 26,
+        interleave_groups_early: int | None = 28,
         depth2_select_mode: str = "flow_vselect",
         idx_branch_mode: str = "flow_vselect",
         trace_phase_tags: bool = False,
@@ -892,6 +892,7 @@ class KernelBuilder:
         vec_one = alloc_vec_const(1, "vec_one")
         vec_two = alloc_vec_const(2, "vec_two")
         vec_three = alloc_vec_const(3, "vec_three")
+        vec_seven = alloc_vec_const(7, "vec_seven")
 
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
             alloc_vec_const(val1, f"hash_c1_{hi}")
@@ -1007,6 +1008,11 @@ class KernelBuilder:
         if batch_size % VLEN != 0:
             vec_count = 0
             use_vliw = False
+        # In submission mode we can carry compact path state across depths 0..2
+        # and materialize full idx only once before depth-3 gathers.
+        use_compact_depth_state = (
+            not self.emit_debug and self.depth2_select_mode == "flow_vselect"
+        )
 
         def emit_vector_group_ops(round, i, regs, depth):
             keys = [(round, i + vi, "idx") for vi in range(VLEN)]
@@ -1049,10 +1055,16 @@ class KernelBuilder:
                     )
                 )
             elif depth == 1:
-                # node_val = node1 + (idx - 1) * (node2 - node1)
-                body.append(
-                    ("valu", ("multiply_add", vec_node_val, vec_idx, vec_node21_diff, vec_node1_minus_diff))
-                )
+                if use_compact_depth_state:
+                    # Depth-0 writes b0=(val&1) into vec_idx; select node1/node2 directly.
+                    body.append(
+                        ("flow", ("vselect", vec_node_val, vec_idx, vec_node2, vec_node1))
+                    )
+                else:
+                    # node_val = node1 + (idx - 1) * (node2 - node1)
+                    body.append(
+                        ("valu", ("multiply_add", vec_node_val, vec_idx, vec_node21_diff, vec_node1_minus_diff))
+                    )
                 body.append(
                     (
                         "debug",
@@ -1071,32 +1083,40 @@ class KernelBuilder:
                     )
                 )
             elif depth == 2:
-                # node_val from nodes 3..6 using idx in [3, 6]
-                body.append(("valu", ("-", vec_addr, vec_idx, vec_three)))  # path
-                body.append(("valu", ("&", vec_val_save, vec_addr, vec_one)))  # b0
-                body.append(("valu", (">>", vec_node_val, vec_addr, vec_one)))  # b1
-                body.append(
-                    ("valu", ("multiply_add", vec_addr, vec_val_save, vec_node43_diff, vec_node3))
-                )  # v01
-                body.append(
-                    ("valu", ("multiply_add", vec_val_save, vec_val_save, vec_node65_diff, vec_node5))
-                )  # v23
-                if self.depth2_select_mode == "flow_vselect":
-                    body.append(
-                        ("flow", ("vselect", vec_node_val, vec_node_val, vec_val_save, vec_addr))
-                    )  # node_val
-                elif self.depth2_select_mode == "alu_blend":
-                    # node_val = v23 + (1 - b1) * (v01 - v23), where b1 is 0 or 1.
-                    body.append(("valu", ("-", vec_addr, vec_addr, vec_val_save)))  # v01-v23
-                    body.append(("valu", ("-", vec_node_val, vec_one, vec_node_val)))  # 1-b1
-                    body.append(
-                        (
-                            "valu",
-                            ("multiply_add", vec_node_val, vec_node_val, vec_addr, vec_val_save),
-                        )
-                    )
+                if use_compact_depth_state:
+                    # vec_idx carries path = 2*b0 + b1 in [0, 3].
+                    body.append(("valu", ("&", vec_addr, vec_idx, vec_one)))  # low bit (b1)
+                    body.append(("valu", ("&", vec_node_val, vec_idx, vec_two)))  # high bit (2*b0)
+                    body.append(("flow", ("vselect", vec_val_save, vec_addr, vec_node4, vec_node3)))
+                    body.append(("flow", ("vselect", vec_addr, vec_addr, vec_node6, vec_node5)))
+                    body.append(("flow", ("vselect", vec_node_val, vec_node_val, vec_addr, vec_val_save)))
                 else:
-                    raise ValueError(f"Unknown depth2_select_mode={self.depth2_select_mode}")
+                    # node_val from nodes 3..6 using idx in [3, 6]
+                    body.append(("valu", ("-", vec_addr, vec_idx, vec_three)))  # path
+                    body.append(("valu", ("&", vec_val_save, vec_addr, vec_one)))  # b0
+                    body.append(("valu", (">>", vec_node_val, vec_addr, vec_one)))  # b1
+                    body.append(
+                        ("valu", ("multiply_add", vec_addr, vec_val_save, vec_node43_diff, vec_node3))
+                    )  # v01
+                    body.append(
+                        ("valu", ("multiply_add", vec_val_save, vec_val_save, vec_node65_diff, vec_node5))
+                    )  # v23
+                    if self.depth2_select_mode == "flow_vselect":
+                        body.append(
+                            ("flow", ("vselect", vec_node_val, vec_node_val, vec_val_save, vec_addr))
+                        )  # node_val
+                    elif self.depth2_select_mode == "alu_blend":
+                        # node_val = v23 + (1 - b1) * (v01 - v23), where b1 is 0 or 1.
+                        body.append(("valu", ("-", vec_addr, vec_addr, vec_val_save)))  # v01-v23
+                        body.append(("valu", ("-", vec_node_val, vec_one, vec_node_val)))  # 1-b1
+                        body.append(
+                            (
+                                "valu",
+                                ("multiply_add", vec_node_val, vec_node_val, vec_addr, vec_val_save),
+                            )
+                        )
+                    else:
+                        raise ValueError(f"Unknown depth2_select_mode={self.depth2_select_mode}")
                 body.append(
                     (
                         "debug",
@@ -1152,6 +1172,24 @@ class KernelBuilder:
             # If this is the final round in non-debug submission mode, idx
             # updates are unnecessary because only values are validated.
             if not self.emit_debug and (depth == forest_height or round == rounds - 1):
+                return
+
+            if use_compact_depth_state and depth == 0:
+                # Carry b0 in vec_idx for depth-1.
+                body.append(("valu", ("&", vec_idx, vec_val, vec_one)))
+                return
+
+            if use_compact_depth_state and depth == 1:
+                # Transition to path state: vec_idx = 2*b0 + b1.
+                body.append(("valu", ("&", vec_addr, vec_val, vec_one)))
+                body.append(("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_addr)))
+                return
+
+            if use_compact_depth_state and depth == 2:
+                # Materialize idx for depth-3: idx = 7 + 2*path + b2.
+                body.append(("valu", ("&", vec_addr, vec_val, vec_one)))
+                body.append(("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_seven)))
+                body.append(("valu", ("+", vec_idx, vec_idx, vec_addr)))
                 return
 
             # idx = 2*idx + (1 if val % 2 == 0 else 2)

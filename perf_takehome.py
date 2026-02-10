@@ -17,6 +17,10 @@ We recommend you look through problem.py next.
 """
 
 from collections import defaultdict
+from copy import deepcopy
+from datetime import datetime, timezone
+import json
+from pathlib import Path
 import random
 import unittest
 
@@ -88,12 +92,190 @@ def print_utilization(instrs, include_debug=False):
     print(format_utilization(stats))
 
 
+def _non_debug_cycle_slot_counts(instrs, slot_limits=SLOT_LIMITS, include_debug=False):
+    engines = [engine for engine in slot_limits if engine != "debug"]
+    cycles = []
+    for instr in instrs:
+        has_non_debug = any(name != "debug" for name in instr.keys())
+        if not has_non_debug and not include_debug:
+            continue
+        cycles.append({engine: len(instr.get(engine, [])) for engine in engines})
+    return cycles
+
+
+def analyze_schedule(instrs, metadata=None, include_debug=False):
+    metadata = metadata or {}
+    util = analyze_utilization(instrs, include_debug=include_debug)
+    cycle_rows = _non_debug_cycle_slot_counts(instrs, include_debug=include_debug)
+
+    engine_pressure = {}
+    for engine in (engine for engine in SLOT_LIMITS if engine != "debug"):
+        limit = SLOT_LIMITS[engine]
+        idle_slots = sum(limit - row[engine] for row in cycle_rows)
+        saturation_cycles = sum(
+            1 for row in cycle_rows if row[engine] == limit and row[engine] > 0
+        )
+        nonzero_cycles = sum(1 for row in cycle_rows if row[engine] > 0)
+        engine_pressure[engine] = {
+            **util["engines"][engine],
+            "idle_slots": idle_slots,
+            "saturation_cycles": saturation_cycles,
+            "active_cycles": nonzero_cycles,
+        }
+
+    bottlenecks = []
+    for engine, stats in sorted(
+        engine_pressure.items(), key=lambda item: item[1]["util_pct"], reverse=True
+    ):
+        if stats["util_pct"] >= 70:
+            bottlenecks.append(
+                {
+                    "engine": engine,
+                    "reason": f"{engine} utilization {stats['util_pct']:.1f}%",
+                    "util_pct": stats["util_pct"],
+                }
+            )
+        elif stats["saturation_cycles"] > 0 and util["cycle_count"] > 0:
+            sat_pct = (stats["saturation_cycles"] / util["cycle_count"]) * 100
+            if sat_pct >= 25:
+                bottlenecks.append(
+                    {
+                        "engine": engine,
+                        "reason": f"{engine} saturated for {sat_pct:.1f}% cycles",
+                        "util_pct": stats["util_pct"],
+                    }
+                )
+
+    phases = []
+    profile = metadata.get("schedule_profile") or {}
+    for segment in profile.get("segments", []):
+        cycles = segment.get("cycle_engine_counts", [])
+        phase_stats = {}
+        n_cycles = len(cycles)
+        for engine in (engine for engine in SLOT_LIMITS if engine != "debug"):
+            limit = SLOT_LIMITS[engine]
+            total = sum(row.get(engine, 0) for row in cycles)
+            avg = total / n_cycles if n_cycles else 0
+            phase_stats[engine] = {
+                "avg": avg,
+                "util_pct": (avg / limit * 100) if n_cycles else 0,
+            }
+        phases.append(
+            {
+                "phase": segment.get("phase", "segment"),
+                "cycles": n_cycles,
+                "engine_utilization": phase_stats,
+            }
+        )
+
+    critical_path_top = []
+    all_ops = []
+    for segment in profile.get("segments", []):
+        phase = segment.get("phase", "segment")
+        for op in segment.get("ops", []):
+            all_ops.append((phase, op))
+    for phase, op in sorted(
+        all_ops,
+        key=lambda item: (item[1].get("crit_path", 0), item[1].get("slot_count", 0)),
+        reverse=True,
+    )[:40]:
+        critical_path_top.append(
+            {
+                "phase": phase,
+                "op_id": op.get("op_id"),
+                "engine": op.get("engine"),
+                "slot_count": op.get("slot_count"),
+                "crit_path": op.get("crit_path"),
+                "cycle": op.get("scheduled_cycle"),
+            }
+        )
+
+    return {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "cycle_count": util["cycle_count"],
+        "engine_pressure": engine_pressure,
+        "bottlenecks": bottlenecks,
+        "phases": phases,
+        "critical_path_top": critical_path_top,
+        "metadata": metadata,
+    }
+
+
+def format_schedule_report(report):
+    lines = [
+        f"# Kernel Diagnostics ({report['cycle_count']} cycles)",
+        "",
+        "## Engine Pressure",
+    ]
+    for engine in (engine for engine in SLOT_LIMITS if engine != "debug"):
+        stats = report["engine_pressure"][engine]
+        lines.append(
+            f"- `{engine}`: avg {stats['avg']:.2f}/{stats['limit']} "
+            f"({stats['util_pct']:.1f}%), saturated cycles {stats['saturation_cycles']}, "
+            f"idle slots {stats['idle_slots']}"
+        )
+    lines.append("")
+    lines.append("## Bottlenecks")
+    if report["bottlenecks"]:
+        for bottleneck in report["bottlenecks"]:
+            lines.append(f"- {bottleneck['reason']}")
+    else:
+        lines.append("- No engine crossed the bottleneck thresholds.")
+
+    lines.append("")
+    lines.append("## Critical Path Hotspots")
+    if report["critical_path_top"]:
+        for node in report["critical_path_top"][:12]:
+            lines.append(
+                f"- phase `{node['phase']}` op#{node['op_id']} "
+                f"engine `{node['engine']}` crit_path={node['crit_path']} cycle={node['cycle']}"
+            )
+    else:
+        lines.append("- Scheduler profiling not enabled for this run.")
+
+    if report["phases"]:
+        lines.append("")
+        lines.append("## Phase Breakdown")
+        for phase in report["phases"]:
+            parts = []
+            for engine in (engine for engine in SLOT_LIMITS if engine != "debug"):
+                util_pct = phase["engine_utilization"][engine]["util_pct"]
+                parts.append(f"{engine} {util_pct:.1f}%")
+            lines.append(
+                f"- `{phase['phase']}`: {phase['cycles']} cycles ({', '.join(parts)})"
+            )
+
+    return "\n".join(lines) + "\n"
+
+
+def write_diagnostics_artifacts(report, diagnostics_out):
+    out_path = Path(diagnostics_out)
+    if out_path.suffix.lower() == ".json":
+        json_path = out_path
+        md_path = out_path.with_suffix(".md")
+    else:
+        out_path.mkdir(parents=True, exist_ok=True)
+        json_path = out_path / "latest_run.json"
+        md_path = out_path / "latest_run.md"
+
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    md_path.write_text(format_schedule_report(report), encoding="utf-8")
+    return str(json_path), str(md_path)
+
+
 class KernelBuilder:
     def __init__(
         self,
         emit_debug: bool = False,
         interleave_groups: int = 25,
         interleave_groups_early: int | None = 26,
+        depth2_select_mode: str = "flow_vselect",
+        idx_branch_mode: str = "flow_vselect",
+        trace_phase_tags: bool = False,
+        scheduler_profile: bool = False,
+        scheduler_crit_weight: int = 1024,
+        scheduler_engine_bias: dict[str, int] | None = None,
     ):
         self.instrs = []
         self.scratch = {}
@@ -105,9 +287,19 @@ class KernelBuilder:
         self.interleave_groups_early = (
             interleave_groups if interleave_groups_early is None else interleave_groups_early
         )
+        self.depth2_select_mode = depth2_select_mode
+        self.idx_branch_mode = idx_branch_mode
+        self.trace_phase_tags = trace_phase_tags
+        self.scheduler_profile_enabled = scheduler_profile
+        self.scheduler_crit_weight = scheduler_crit_weight
+        self.scheduler_engine_bias = scheduler_engine_bias or {}
+        self._schedule_segments = []
 
     def debug_info(self):
         return DebugInfo(scratch_map=self.scratch_debug)
+
+    def schedule_profile(self):
+        return {"segments": deepcopy(self._schedule_segments)}
 
     def _slot_reads_writes(self, engine, slot):
         reads = set()
@@ -255,7 +447,7 @@ class KernelBuilder:
         optimized.reverse()
         return optimized
 
-    def _schedule_vliw(self, slots: list[tuple[Engine, tuple]]):
+    def _schedule_vliw(self, slots: list[tuple[Engine, tuple]], phase_tag: str | None = None):
         if not slots:
             return []
 
@@ -321,16 +513,25 @@ class KernelBuilder:
                     max_succ = crit_path[s]
             crit_path[i] = 1 + max_succ
 
+        op_priority = [0] * n_ops
+        for i, (engine, _, _, _, _) in enumerate(ops):
+            op_priority[i] = (
+                crit_path[i] * self.scheduler_crit_weight
+                + self.scheduler_engine_bias.get(engine, 0)
+            )
+
         ready_heap = []
         for i in range(n_ops):
             if strict_pred_count[i] == 0 and weak_pred_count[i] == 0:
-                heapq.heappush(ready_heap, (-crit_path[i], i))
+                heapq.heappush(ready_heap, (-op_priority[i], i))
 
         max_strict_pred_cycle = [-1] * n_ops
         max_weak_pred_cycle = [-1] * n_ops
         scheduled = [False] * n_ops
 
         instrs = []
+        cycle_engine_counts = []
+        scheduled_cycle = [-1] * n_ops
         cycle = 0
         remaining = n_ops
 
@@ -341,24 +542,25 @@ class KernelBuilder:
             scheduled_any = False
 
             while ready_heap:
-                neg_cp, i = heapq.heappop(ready_heap)
+                neg_prio, i = heapq.heappop(ready_heap)
                 if scheduled[i]:
                     continue
 
                 if max_strict_pred_cycle[i] + 1 > cycle:
-                    deferred.append((-crit_path[i], i))
+                    deferred.append((-op_priority[i], i))
                     continue
                 if max_weak_pred_cycle[i] > cycle:
-                    deferred.append((-crit_path[i], i))
+                    deferred.append((-op_priority[i], i))
                     continue
 
                 engine, slot_list, _, _, slot_count = ops[i]
                 if engine_counts[engine] + slot_count > SLOT_LIMITS[engine]:
-                    deferred.append((-crit_path[i], i))
+                    deferred.append((-op_priority[i], i))
                     continue
 
                 scheduled_any = True
                 scheduled[i] = True
+                scheduled_cycle[i] = cycle
                 remaining -= 1
 
                 engine_counts[engine] += slot_count
@@ -369,19 +571,20 @@ class KernelBuilder:
                     if max_strict_pred_cycle[succ] < cycle:
                         max_strict_pred_cycle[succ] = cycle
                     if strict_pred_count[succ] == 0 and weak_pred_count[succ] == 0:
-                        heapq.heappush(ready_heap, (-crit_path[succ], succ))
+                        heapq.heappush(ready_heap, (-op_priority[succ], succ))
 
                 for succ in weak_succs[i]:
                     weak_pred_count[succ] -= 1
                     if max_weak_pred_cycle[succ] < cycle:
                         max_weak_pred_cycle[succ] = cycle
                     if strict_pred_count[succ] == 0 and weak_pred_count[succ] == 0:
-                        heapq.heappush(ready_heap, (-crit_path[succ], succ))
+                        heapq.heappush(ready_heap, (-op_priority[succ], succ))
 
             if not scheduled_any:
                 raise RuntimeError("VLIW scheduler deadlock (no schedulable ops)")
 
             instrs.append(bundle)
+            cycle_engine_counts.append(dict(engine_counts))
             cycle += 1
 
             if deferred:
@@ -390,9 +593,38 @@ class KernelBuilder:
             else:
                 ready_heap = []
 
+        if self.scheduler_profile_enabled:
+            ops_meta = []
+            for i, (engine, slot_list, reads, writes, slot_count) in enumerate(ops):
+                ops_meta.append(
+                    {
+                        "op_id": i,
+                        "engine": engine,
+                        "slot_count": slot_count,
+                        "reads": sorted(reads),
+                        "writes": sorted(writes),
+                        "crit_path": crit_path[i],
+                        "priority": op_priority[i],
+                        "scheduled_cycle": scheduled_cycle[i],
+                    }
+                )
+            self._schedule_segments.append(
+                {
+                    "phase": phase_tag or "segment",
+                    "ops": ops_meta,
+                    "cycle_engine_counts": cycle_engine_counts,
+                }
+            )
+
         return instrs
 
-    def build(self, slots: list[tuple[Engine, tuple]], vliw: bool = False):
+    def build(
+        self,
+        slots: list[tuple[Engine, tuple]],
+        vliw: bool = False,
+        phase_tag: str | None = None,
+        optimize: bool = True,
+    ):
         # Simple slot packing that just uses one slot per instruction bundle
         if not vliw:
             instrs = []
@@ -408,15 +640,29 @@ class KernelBuilder:
 
         instrs = []
         segment = []
+        segment_idx = 0
         for engine, slot in slots:
             if self._is_barrier(engine, slot):
-                instrs.extend(self._schedule_vliw(self._optimize_slots(segment)))
+                tag = phase_tag if phase_tag else "segment"
+                instrs.extend(
+                    self._schedule_vliw(
+                        self._optimize_slots(segment) if optimize else segment,
+                        phase_tag=f"{tag}:{segment_idx}",
+                    )
+                )
                 segment = []
+                segment_idx += 1
                 instrs.append({engine: [slot]})
             else:
                 segment.append((engine, slot))
 
-        instrs.extend(self._schedule_vliw(self._optimize_slots(segment)))
+        tag = phase_tag if phase_tag else "segment"
+        instrs.extend(
+            self._schedule_vliw(
+                self._optimize_slots(segment) if optimize else segment,
+                phase_tag=f"{tag}:{segment_idx}",
+            )
+        )
         return instrs
 
     def add(self, engine, slot):
@@ -518,6 +764,7 @@ class KernelBuilder:
         Like reference_kernel2 but building actual instructions.
         Vectorized inner loop using SIMD VALU + gather via load_offset.
         """
+        self._schedule_segments = []
         tmp1 = self.alloc_scratch("tmp1")
         tmp2 = self.alloc_scratch("tmp2")
         tmp3 = self.alloc_scratch("tmp3")
@@ -715,9 +962,14 @@ class KernelBuilder:
         # kernel to let you debug at intermediate steps. The testing harness in this
         # file requires these match up to the reference kernel's yields, but the
         # submission harness ignores them.
+        header_phase_tag = "header" if self.trace_phase_tags else None
+        body_phase_tag = "kernel_body" if self.trace_phase_tags else None
         if self.emit_debug:
             # Schedule header separately before the pause barrier
-            header_instrs = self.build(header, vliw=True)
+            # Header outputs are consumed in a later segment, so skip local DCE here.
+            header_instrs = self.build(
+                header, vliw=True, phase_tag=header_phase_tag, optimize=False
+            )
             self.instrs.extend(header_instrs)
             self.instrs.append({"flow": [("pause",)]})
         # Any debug engine instruction is ignored by the submission simulator
@@ -825,9 +1077,22 @@ class KernelBuilder:
                 body.append(
                     ("valu", ("multiply_add", vec_val_save, vec_val_save, vec_node65_diff, vec_node5))
                 )  # v23
-                body.append(
-                    ("flow", ("vselect", vec_node_val, vec_node_val, vec_val_save, vec_addr))
-                )  # node_val
+                if self.depth2_select_mode == "flow_vselect":
+                    body.append(
+                        ("flow", ("vselect", vec_node_val, vec_node_val, vec_val_save, vec_addr))
+                    )  # node_val
+                elif self.depth2_select_mode == "alu_blend":
+                    # node_val = v23 + (1 - b1) * (v01 - v23), where b1 is 0 or 1.
+                    body.append(("valu", ("-", vec_addr, vec_addr, vec_val_save)))  # v01-v23
+                    body.append(("valu", ("-", vec_node_val, vec_one, vec_node_val)))  # 1-b1
+                    body.append(
+                        (
+                            "valu",
+                            ("multiply_add", vec_node_val, vec_node_val, vec_addr, vec_val_save),
+                        )
+                    )
+                else:
+                    raise ValueError(f"Unknown depth2_select_mode={self.depth2_select_mode}")
                 body.append(
                     (
                         "debug",
@@ -889,10 +1154,20 @@ class KernelBuilder:
             # => branch = (val & 1) + 1
             if depth == 0:
                 body.append(("valu", ("&", vec_tmp1, vec_val, vec_one)))
-                body.append(("flow", ("vselect", vec_idx, vec_tmp1, vec_two, vec_one)))
+                if self.idx_branch_mode == "flow_vselect":
+                    body.append(("flow", ("vselect", vec_idx, vec_tmp1, vec_two, vec_one)))
+                elif self.idx_branch_mode == "alu_branch":
+                    body.append(("valu", ("+", vec_idx, vec_tmp1, vec_one)))
+                else:
+                    raise ValueError(f"Unknown idx_branch_mode={self.idx_branch_mode}")
             else:
                 body.append(("valu", ("&", vec_tmp1, vec_val, vec_one)))
-                body.append(("flow", ("vselect", vec_tmp2, vec_tmp1, vec_two, vec_one)))
+                if self.idx_branch_mode == "flow_vselect":
+                    body.append(("flow", ("vselect", vec_tmp2, vec_tmp1, vec_two, vec_one)))
+                elif self.idx_branch_mode == "alu_branch":
+                    body.append(("valu", ("+", vec_tmp2, vec_tmp1, vec_one)))
+                else:
+                    raise ValueError(f"Unknown idx_branch_mode={self.idx_branch_mode}")
                 body.append(
                     ("valu", ("multiply_add", vec_idx, vec_idx, vec_two, vec_tmp2))
                 )
@@ -1034,7 +1309,7 @@ class KernelBuilder:
             body.append(("store", ("store", tmp_addr, idx_arr + i)))
             body.append(("store", ("store", tmp_addr_b, val_arr + i)))
 
-        body_instrs = self.build(body, vliw=use_vliw)
+        body_instrs = self.build(body, vliw=use_vliw, phase_tag=body_phase_tag)
         self.instrs.extend(body_instrs)
         # Required to match with the yield in reference_kernel2
         if self.emit_debug:
@@ -1050,6 +1325,9 @@ def do_kernel_test(
     trace: bool = False,
     prints: bool = False,
     utilization: bool = False,
+    debug_mode: bool = False,
+    diagnostics_out: str | None = None,
+    kernel_kwargs: dict | None = None,
 ):
     print(f"{forest_height=}, {rounds=}, {batch_size=}")
     random.seed(seed)
@@ -1057,7 +1335,14 @@ def do_kernel_test(
     inp = Input.generate(forest, batch_size, rounds)
     mem = build_mem_image(forest, inp)
 
-    kb = KernelBuilder()
+    builder_kwargs = dict(kernel_kwargs or {})
+    if (trace or debug_mode) and "emit_debug" not in builder_kwargs:
+        builder_kwargs["emit_debug"] = True
+    if diagnostics_out is not None and "scheduler_profile" not in builder_kwargs:
+        builder_kwargs["scheduler_profile"] = True
+    if diagnostics_out is not None and "trace_phase_tags" not in builder_kwargs:
+        builder_kwargs["trace_phase_tags"] = True
+    kb = KernelBuilder(**builder_kwargs)
     kb.build_kernel(forest.height, len(forest.values), len(inp.indices), rounds)
     # print(kb.instrs)
     if utilization:
@@ -1073,8 +1358,28 @@ def do_kernel_test(
         trace=trace,
     )
     machine.prints = prints
-    for i, ref_mem in enumerate(reference_kernel2(mem, value_trace)):
+    round_aligned_mode = trace or debug_mode or kb.emit_debug
+    if round_aligned_mode:
+        for i, ref_mem in enumerate(reference_kernel2(mem, value_trace)):
+            machine.run()
+            inp_values_p = ref_mem[6]
+            if prints:
+                print(machine.mem[inp_values_p : inp_values_p + len(inp.values)])
+                print(ref_mem[inp_values_p : inp_values_p + len(inp.values)])
+            assert (
+                machine.mem[inp_values_p : inp_values_p + len(inp.values)]
+                == ref_mem[inp_values_p : inp_values_p + len(inp.values)]
+            ), f"Incorrect result on round {i}"
+            inp_indices_p = ref_mem[5]
+            if prints:
+                print(machine.mem[inp_indices_p : inp_indices_p + len(inp.indices)])
+                print(ref_mem[inp_indices_p : inp_indices_p + len(inp.indices)])
+            # Updating these in memory isn't required, but you can enable this check for debugging
+            # assert machine.mem[inp_indices_p:inp_indices_p+len(inp.indices)] == ref_mem[inp_indices_p:inp_indices_p+len(inp.indices)]
+    else:
         machine.run()
+        for ref_mem in reference_kernel2(mem, value_trace):
+            pass
         inp_values_p = ref_mem[6]
         if prints:
             print(machine.mem[inp_values_p : inp_values_p + len(inp.values)])
@@ -1082,16 +1387,48 @@ def do_kernel_test(
         assert (
             machine.mem[inp_values_p : inp_values_p + len(inp.values)]
             == ref_mem[inp_values_p : inp_values_p + len(inp.values)]
-        ), f"Incorrect result on round {i}"
-        inp_indices_p = ref_mem[5]
-        if prints:
-            print(machine.mem[inp_indices_p : inp_indices_p + len(inp.indices)])
-            print(ref_mem[inp_indices_p : inp_indices_p + len(inp.indices)])
-        # Updating these in memory isn't required, but you can enable this check for debugging
-        # assert machine.mem[inp_indices_p:inp_indices_p+len(inp.indices)] == ref_mem[inp_indices_p:inp_indices_p+len(inp.indices)]
+        ), "Incorrect output values"
 
     print("CYCLES: ", machine.cycle)
     print("Speedup over baseline: ", BASELINE / machine.cycle)
+
+    if diagnostics_out is not None:
+        metadata = {
+            "cycles": machine.cycle,
+            "seed": seed,
+            "forest_height": forest_height,
+            "rounds": rounds,
+            "batch_size": batch_size,
+            "kernel_config": builder_kwargs,
+            "schedule_profile": kb.schedule_profile(),
+        }
+        try:
+            from tools.opt_debug.analyze_schedule import (
+                analyze_schedule_artifacts,
+                render_run_markdown,
+            )
+
+            run_diag = analyze_schedule_artifacts(
+                kb.instrs,
+                schedule_profile=kb.schedule_profile(),
+                metadata=metadata,
+                include_candidates=True,
+            )
+            out_dir = Path(diagnostics_out)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            json_path = out_dir / "latest_run.json"
+            md_path = out_dir / "latest_run.md"
+            json_path.write_text(
+                json.dumps(run_diag.to_dict(), indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            md_path.write_text(render_run_markdown(run_diag), encoding="utf-8")
+            json_path, md_path = str(json_path), str(md_path)
+        except Exception:
+            diagnostics = analyze_schedule(kb.instrs, metadata=metadata)
+            json_path, md_path = write_diagnostics_artifacts(diagnostics, diagnostics_out)
+        print(f"Diagnostics written to {json_path} and {md_path}")
+
     return machine.cycle
 
 

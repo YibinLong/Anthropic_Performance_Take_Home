@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import random
 import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -27,6 +28,46 @@ from tools.opt_debug.analyze_schedule import (
 )
 from tools.opt_debug.analyze_trace import analyze_trace
 from tools.opt_debug.schemas import ExperimentResult, RunDiagnostics
+
+
+def _assert_tests_unchanged(where: str) -> None:
+    diff = subprocess.run(
+        ["git", "diff", "--", "tests/"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if diff:
+        raise RuntimeError(
+            f"tests/ changed during optimization ({where}). Refusing to continue.\n{diff}"
+        )
+
+
+def _compact_trial_summary(
+    result: ExperimentResult,
+    diagnostics: RunDiagnostics | None,
+) -> dict[str, Any]:
+    engine_util_pct: dict[str, float] = {}
+    if diagnostics is not None:
+        for engine, stats in diagnostics.engine_pressure.items():
+            engine_util_pct[engine] = round(stats.util_pct, 2)
+
+    params = result.params
+    return {
+        "trial_id": result.trial_id,
+        "cycles": result.cycles,
+        "correct": result.passed_correctness,
+        "engine_util_pct": engine_util_pct,
+        "config": {
+            "interleave_groups": params.get("interleave_groups"),
+            "interleave_groups_early": params.get("interleave_groups_early"),
+            "depth2_select_mode": params.get("depth2_select_mode"),
+            "idx_branch_mode": params.get("idx_branch_mode"),
+            "scheduler_crit_weight": params.get("scheduler_crit_weight"),
+            "scheduler_engine_bias": params.get("scheduler_engine_bias"),
+        },
+    }
 
 
 def _evaluate_once(
@@ -149,11 +190,12 @@ def _run_optuna(
     rounds: int,
     batch_size: int,
     out_dir: Path,
-) -> tuple[list[ExperimentResult], dict[int, RunDiagnostics | None]]:
+) -> tuple[list[ExperimentResult], dict[int, RunDiagnostics | None], list[dict[str, Any]]]:
     import optuna
 
     results: list[ExperimentResult] = []
     diagnostics_by_trial: dict[int, RunDiagnostics | None] = {}
+    compact_summaries: list[dict[str, Any]] = []
 
     sampler = optuna.samplers.TPESampler(seed=seed)
     pruner = optuna.pruners.MedianPruner(n_warmup_steps=5)
@@ -189,6 +231,7 @@ def _run_optuna(
         )
         results.append(result)
         diagnostics_by_trial[result.trial_id] = diag
+        compact_summaries.append(_compact_trial_summary(result, diag))
 
         trial.set_user_attr("cycles", result.cycles)
         trial.set_user_attr("passed_correctness", result.passed_correctness)
@@ -199,7 +242,7 @@ def _run_optuna(
         return float(result.cycles)
 
     study.optimize(objective, n_trials=n_trials)
-    return results, diagnostics_by_trial
+    return results, diagnostics_by_trial, compact_summaries
 
 
 def _run_random(
@@ -209,10 +252,11 @@ def _run_random(
     rounds: int,
     batch_size: int,
     out_dir: Path,
-) -> tuple[list[ExperimentResult], dict[int, RunDiagnostics | None]]:
+) -> tuple[list[ExperimentResult], dict[int, RunDiagnostics | None], list[dict[str, Any]]]:
     rng = random.Random(seed)
     results: list[ExperimentResult] = []
     diagnostics_by_trial: dict[int, RunDiagnostics | None] = {}
+    compact_summaries: list[dict[str, Any]] = []
     for i in range(n_trials):
         params = _sample_params(rng)
         result, diag = _evaluate_once(
@@ -226,7 +270,8 @@ def _run_random(
         )
         results.append(result)
         diagnostics_by_trial[result.trial_id] = diag
-    return results, diagnostics_by_trial
+        compact_summaries.append(_compact_trial_summary(result, diag))
+    return results, diagnostics_by_trial, compact_summaries
 
 
 def _render_leaderboard_md(results: list[ExperimentResult]) -> str:
@@ -271,10 +316,18 @@ def run() -> None:
         action="store_true",
         help="Generate and analyze trace.json for the best discovered config.",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="submission",
+        choices=["submission"],
+        help="Execution mode. 'submission' enforces frozen submission semantics (emit_debug=False).",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    _assert_tests_unchanged("before-run")
 
     backend = args.backend
     if backend == "auto":
@@ -286,7 +339,7 @@ def run() -> None:
             backend = "random"
 
     if backend == "optuna":
-        results, diagnostics_by_trial = _run_optuna(
+        results, diagnostics_by_trial, compact_summaries = _run_optuna(
             n_trials=args.trials,
             seed=args.seed,
             forest_height=args.forest_height,
@@ -295,7 +348,7 @@ def run() -> None:
             out_dir=out_dir,
         )
     else:
-        results, diagnostics_by_trial = _run_random(
+        results, diagnostics_by_trial, compact_summaries = _run_random(
             n_trials=args.trials,
             seed=args.seed,
             forest_height=args.forest_height,
@@ -304,6 +357,8 @@ def run() -> None:
             out_dir=out_dir,
         )
 
+    _assert_tests_unchanged("after-run")
+
     leaderboard_json = out_dir / "leaderboard.json"
     leaderboard_md = out_dir / "leaderboard.md"
     leaderboard_json.write_text(
@@ -311,6 +366,10 @@ def run() -> None:
         encoding="utf-8",
     )
     leaderboard_md.write_text(_render_leaderboard_md(results), encoding="utf-8")
+    (out_dir / "trial_summaries.json").write_text(
+        json.dumps(compact_summaries, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
     best = min(results, key=lambda r: (not r.passed_correctness, r.cycles))
     best_trial_dir = out_dir / "trials" / f"trial_{best.trial_id:04d}"

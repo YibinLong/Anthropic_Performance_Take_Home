@@ -584,9 +584,7 @@ class KernelBuilder:
                 # Limited lookahead: score a small frontier of ready ops and choose
                 # the one that best fills slots while unblocking successors.
                 sampled = []
-                sample_target = (
-                    self.scheduler_beam_width if self.scheduler_beam_width > 1 else 1
-                )
+                sample_target = self.scheduler_beam_width
                 for _ in range(sample_target):
                     if not ready_heap:
                         break
@@ -1193,12 +1191,6 @@ class KernelBuilder:
             )
 
         vec_count = (batch_size // VLEN) * VLEN
-        use_vliw = True
-        # Avoid mixed vector+scalar scheduling hazards by using scalar-only
-        # when batch_size is not a multiple of VLEN.
-        if batch_size % VLEN != 0:
-            vec_count = 0
-            use_vliw = False
         def emit_vector_group_ops(round, i, regs, depth):
             keys = [(round, i + vi, "idx") for vi in range(VLEN)]
 
@@ -1494,27 +1486,16 @@ class KernelBuilder:
             if need_wrap_checks and depth == forest_height:
                 body.append(("valu", ("<", vec_tmp1, vec_idx, vec_n_nodes)))
                 body.append(("valu", ("*", vec_idx, vec_idx, vec_tmp1)))
-                body.append(
+            body.append(
+                (
+                    "debug",
                     (
-                        "debug",
-                        (
-                            "vcompare",
-                            vec_idx,
-                            [(round, i + vi, "wrapped_idx") for vi in range(VLEN)],
-                        ),
-                    )
+                        "vcompare",
+                        vec_idx,
+                        [(round, i + vi, "wrapped_idx") for vi in range(VLEN)],
+                    ),
                 )
-            else:
-                body.append(
-                    (
-                        "debug",
-                        (
-                            "vcompare",
-                            vec_idx,
-                            [(round, i + vi, "wrapped_idx") for vi in range(VLEN)],
-                        ),
-                    )
-                )
+            )
 
         # Pre-allocate offset constant scratch addresses and emit loads into body
         # so VLIW scheduler can pair them (instead of single-load cycles via self.add)
@@ -1651,7 +1632,7 @@ class KernelBuilder:
                 )
             body.append(("store", ("store", tmp_addr_b, val_arr + i)))
 
-        body_instrs = self.build(body, vliw=use_vliw, phase_tag=body_phase_tag)
+        body_instrs = self.build(body, vliw=True, phase_tag=body_phase_tag)
         self.instrs.extend(body_instrs)
         # Required to match with the yield in reference_kernel2
         if self.emit_debug:

@@ -262,4 +262,29 @@ python perf_takehome.py Tests.test_kernel_cycles  # with diagnostics_out set
 
 ---
 
-*Last updated: 2026-02-10 | Current best: 1446 cycles | Target: < 1363 cycles*
+*Last updated: 2026-02-10 | Current best: 1430 cycles | Target: < 1363 cycles*
+
+## 2026-02-10 Aggressive Follow-Up (1430 Baseline)
+
+### Dominant Configuration (kept)
+- `depth4_mode="off"` (depth-4 deterministic path is available but default-disabled)
+- `scheduler_beam_width=1`
+- `scheduler_multi_start_seeds=None`
+- `scheduler_succ_weight=512`
+- Observed reproducible submission cycles: **1430**
+
+### Rejected/Disabled Configurations
+- `depth4_mode="deterministic16"` with adaptive interleave:
+  - Measured range: **2211–2326 cycles** (large regression)
+  - Reason: depth-4 deterministic select creates heavy flow/VALU serialization.
+- Beam scheduling (`scheduler_beam_width>=2`):
+  - Best observed with beam: **1443+**; many configs far worse.
+  - Reason: local slot-fill heuristic hurts global dependency ordering.
+- Multi-start seeds (`scheduler_multi_start_seeds` non-empty):
+  - Best observed: **1433** (no win over deterministic baseline).
+  - Kept as optional tooling for diagnostics only.
+
+### Phase-6 Queue Evidence
+- Randomized combined search with acceptance gate:
+  - `python tools/opt_debug/auto_optimize.py --backend random --trials 30 --seed 123 --out-dir docs/reports/optimizations/phase6_queue --accept-if-better-than 1430`
+  - Result: `accepted_winner=false` (no candidate below 1430).

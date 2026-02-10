@@ -238,13 +238,14 @@ Attempt higher-risk depth-4 optimization to remove additional gather cost, accep
 #### Automated Verification:
 - [ ] Full `python tests/submission_tests.py` pass.
 - [ ] Net cycle improvement over Phase-3 best.
-- [ ] No increase in correctness flakiness across repeated runs.
+- [x] No increase in correctness flakiness across repeated runs.
 
 #### Manual Verification:
 - [ ] Confirm changed scratch/interleave config is documented in run artifacts.
 - [ ] Confirm improvement is robust, not a one-off measurement artifact.
 
 **Implementation Note**: After this phase passes, pause for manual confirmation before Phase 5.
+**Phase 4 status (2026-02-10):** Implemented submission-only `depth4_mode="deterministic16"` with preloaded nodes `15..30`, adaptive interleave reduction under scratch pressure, and acceptance-gated rollout (`depth4_mode` stays default `"off"`). Sweep results regressed heavily (`2211`–`2326` cycles vs best `1430`), so mode remains rollback-disabled by default.
 
 ---
 
@@ -287,13 +288,14 @@ for seed in seed_list:
 #### Automated Verification:
 - [ ] Submission tests pass with selected scheduler mode.
 - [ ] Chosen scheduler mode consistently beats prior best cycles.
-- [ ] Build-time overhead remains acceptable (kernel build still practical for repeated tests).
+- [x] Build-time overhead remains acceptable (kernel build still practical for repeated tests).
 
 #### Manual Verification:
 - [ ] Confirm selected scheduler mode is deterministic and reproducible.
 - [ ] Confirm fallback mode is preserved for fast rollback.
 
 **Implementation Note**: After this phase passes, pause for manual confirmation before Phase 6.
+**Phase 5 status (2026-02-10):** Added optional scheduler multi-start (`scheduler_multi_start_seeds`) and limited lookahead beam mode (`scheduler_beam_width`) with seed/mode profiling in schedule metadata. Sweep across beam widths/seeds/successor weights found no improvement beyond current best `1430`; default greedy mode (`beam_width=1`, no multi-start seeds) remains dominant.
 
 ---
 
@@ -326,13 +328,14 @@ Keep executing high-risk experiments (submission-only) until `<1363` is reached 
 #### Automated Verification:
 - [ ] `python tests/submission_tests.py` passes all tests.
 - [ ] `CYCLES` is `<1363`.
-- [ ] `git diff -- tests/` remains empty.
+- [x] `git diff -- tests/` remains empty.
 
 #### Manual Verification:
 - [ ] Confirm winning config is clearly documented and reproducible.
 - [ ] Confirm no experimental dead code remains in final selected path.
 
 **Implementation Note**: After this phase and verification, stop and present final result summary.
+**Phase 6 status (2026-02-10):** Executed high-risk queue: depth-4 deterministic variants, scheduler beam/seed sweeps, and randomized combined search via `tools/opt_debug/auto_optimize.py` with acceptance gate (`--accept-if-better-than 1430`). No dominant configuration beat `1430`; queue artifacts saved under `docs/reports/optimizations/phase6_queue/`.
 
 ---
 

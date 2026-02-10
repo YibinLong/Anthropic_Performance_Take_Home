@@ -272,6 +272,8 @@ class KernelBuilder:
         interleave_groups_early: int | None = 29,
         depth2_select_mode: str = "flow_vselect",
         depth3_deterministic: bool = False,
+        depth4_mode: str = "off",
+        depth4_adaptive_interleave: bool = True,
         idx_branch_mode: str = "flow_vselect",
         trace_phase_tags: bool = False,
         scheduler_profile: bool = False,
@@ -280,6 +282,8 @@ class KernelBuilder:
         split_hash_pairs: bool = True,
         scheduler_succ_weight: int = 512,
         scheduler_random_seed: int | None = None,
+        scheduler_multi_start_seeds: tuple[int, ...] | list[int] | None = None,
+        scheduler_beam_width: int = 1,
     ):
         self.instrs = []
         self.scratch = {}
@@ -293,6 +297,10 @@ class KernelBuilder:
         )
         self.depth2_select_mode = depth2_select_mode
         self.depth3_deterministic = depth3_deterministic
+        if depth4_mode not in {"off", "deterministic16"}:
+            raise ValueError(f"Unsupported depth4_mode={depth4_mode}")
+        self.depth4_mode = depth4_mode
+        self.depth4_adaptive_interleave = depth4_adaptive_interleave
         self.idx_branch_mode = idx_branch_mode
         self.trace_phase_tags = trace_phase_tags
         self.scheduler_profile_enabled = scheduler_profile
@@ -301,6 +309,12 @@ class KernelBuilder:
         self.split_hash_pairs = split_hash_pairs
         self.scheduler_succ_weight = scheduler_succ_weight
         self.scheduler_random_seed = scheduler_random_seed
+        self.scheduler_multi_start_seeds = (
+            tuple(scheduler_multi_start_seeds)
+            if scheduler_multi_start_seeds is not None
+            else None
+        )
+        self.scheduler_beam_width = max(1, int(scheduler_beam_width))
         self._schedule_segments = []
 
     def debug_info(self):
@@ -455,9 +469,14 @@ class KernelBuilder:
         optimized.reverse()
         return optimized
 
-    def _schedule_vliw(self, slots: list[tuple[Engine, tuple]], phase_tag: str | None = None):
+    def _schedule_vliw(
+        self,
+        slots: list[tuple[Engine, tuple]],
+        phase_tag: str | None = None,
+        random_seed: int | None = None,
+    ):
         if not slots:
-            return []
+            return [], None
 
         ops = []
         for engine, slot in slots:
@@ -533,10 +552,12 @@ class KernelBuilder:
                 + self.scheduler_engine_bias.get(engine, 0)
             )
 
-        if self.scheduler_random_seed is not None:
-            rng = random.Random(self.scheduler_random_seed)
+        if random_seed is not None:
+            rng = random.Random(random_seed)
             for i in range(n_ops):
                 op_priority[i] += rng.randint(0, self.scheduler_crit_weight // 4)
+
+        succ_count = [len(strict_succs[i]) + len(weak_succs[i]) for i in range(n_ops)]
 
         ready_heap = []
         for i in range(n_ops):
@@ -560,21 +581,52 @@ class KernelBuilder:
             scheduled_any = False
 
             while ready_heap:
-                neg_prio, i = heapq.heappop(ready_heap)
-                if scheduled[i]:
+                # Limited lookahead: score a small frontier of ready ops and choose
+                # the one that best fills slots while unblocking successors.
+                sampled = []
+                sample_target = (
+                    self.scheduler_beam_width if self.scheduler_beam_width > 1 else 1
+                )
+                for _ in range(sample_target):
+                    if not ready_heap:
+                        break
+                    sampled.append(heapq.heappop(ready_heap))
+
+                feasible = []
+                for _, i in sampled:
+                    if scheduled[i]:
+                        continue
+                    if max_strict_pred_cycle[i] + 1 > cycle:
+                        deferred.append((-op_priority[i], i))
+                        continue
+                    if max_weak_pred_cycle[i] > cycle:
+                        deferred.append((-op_priority[i], i))
+                        continue
+                    engine, _, _, _, slot_count = ops[i]
+                    if engine_counts[engine] + slot_count > SLOT_LIMITS[engine]:
+                        deferred.append((-op_priority[i], i))
+                        continue
+                    feasible.append(i)
+
+                if not feasible:
                     continue
 
-                if max_strict_pred_cycle[i] + 1 > cycle:
-                    deferred.append((-op_priority[i], i))
-                    continue
-                if max_weak_pred_cycle[i] > cycle:
-                    deferred.append((-op_priority[i], i))
-                    continue
+                def candidate_score(op_idx: int):
+                    engine, _, _, _, slot_count = ops[op_idx]
+                    remaining_slots = SLOT_LIMITS[engine] - engine_counts[engine]
+                    slot_fill = min(remaining_slots, slot_count)
+                    return (
+                        slot_fill,
+                        succ_count[op_idx],
+                        op_priority[op_idx],
+                    )
+
+                i = max(feasible, key=candidate_score)
+                for _, idx in sampled:
+                    if idx != i and not scheduled[idx]:
+                        deferred.append((-op_priority[idx], idx))
 
                 engine, slot_list, _, _, slot_count = ops[i]
-                if engine_counts[engine] + slot_count > SLOT_LIMITS[engine]:
-                    deferred.append((-op_priority[i], i))
-                    continue
 
                 scheduled_any = True
                 scheduled[i] = True
@@ -611,6 +663,7 @@ class KernelBuilder:
             else:
                 ready_heap = []
 
+        profile_segment = None
         if self.scheduler_profile_enabled:
             ops_meta = []
             for i, (engine, slot_list, reads, writes, slot_count) in enumerate(ops):
@@ -626,15 +679,49 @@ class KernelBuilder:
                         "scheduled_cycle": scheduled_cycle[i],
                     }
                 )
-            self._schedule_segments.append(
-                {
-                    "phase": phase_tag or "segment",
-                    "ops": ops_meta,
-                    "cycle_engine_counts": cycle_engine_counts,
-                }
-            )
+            profile_segment = {
+                "phase": phase_tag or "segment",
+                "ops": ops_meta,
+                "cycle_engine_counts": cycle_engine_counts,
+                "scheduler_seed": random_seed,
+                "scheduler_beam_width": self.scheduler_beam_width,
+            }
 
-        return instrs
+        return instrs, profile_segment
+
+    def _schedule_segment(
+        self,
+        segment: list[tuple[Engine, tuple]],
+        tag: str,
+    ) -> list[dict[str, list[tuple]]]:
+        if not segment:
+            return []
+        if self.scheduler_multi_start_seeds is None:
+            seeds = [self.scheduler_random_seed]
+        else:
+            seeds = list(self.scheduler_multi_start_seeds)
+            if self.scheduler_random_seed is not None:
+                seeds = [self.scheduler_random_seed] + seeds
+            # Preserve order while deduplicating.
+            seeds = list(dict.fromkeys(seeds))
+
+        best_instrs = None
+        best_profile = None
+        best_cycles = None
+        candidate_runs = []
+        for seed in seeds:
+            instrs, profile = self._schedule_vliw(segment, phase_tag=tag, random_seed=seed)
+            cycles = len(instrs)
+            candidate_runs.append({"seed": seed, "cycles": cycles})
+            if best_cycles is None or cycles < best_cycles:
+                best_cycles = cycles
+                best_instrs = instrs
+                best_profile = profile
+
+        if self.scheduler_profile_enabled and best_profile is not None:
+            best_profile["scheduler_candidates"] = candidate_runs
+            self._schedule_segments.append(best_profile)
+        return best_instrs or []
 
     def build(
         self,
@@ -663,9 +750,9 @@ class KernelBuilder:
             if self._is_barrier(engine, slot):
                 tag = phase_tag if phase_tag else "segment"
                 instrs.extend(
-                    self._schedule_vliw(
+                    self._schedule_segment(
                         self._optimize_slots(segment) if optimize else segment,
-                        phase_tag=f"{tag}:{segment_idx}",
+                        tag=f"{tag}:{segment_idx}",
                     )
                 )
                 segment = []
@@ -676,9 +763,9 @@ class KernelBuilder:
 
         tag = phase_tag if phase_tag else "segment"
         instrs.extend(
-            self._schedule_vliw(
+            self._schedule_segment(
                 self._optimize_slots(segment) if optimize else segment,
-                phase_tag=f"{tag}:{segment_idx}",
+                tag=f"{tag}:{segment_idx}",
             )
         )
         return instrs
@@ -881,6 +968,11 @@ class KernelBuilder:
         use_depth3_deterministic = (
             not self.emit_debug and self.depth3_deterministic and use_compact_depth_state
         )
+        use_depth4_deterministic = (
+            not self.emit_debug
+            and self.depth4_mode == "deterministic16"
+            and use_compact_depth_state
+        )
         # Wrap checks are only required in debug mode where idx traces are validated.
         need_wrap_checks = self.emit_debug
         init_vars = [
@@ -935,9 +1027,11 @@ class KernelBuilder:
         if use_compact_depth_state:
             vec_three = None
             vec_seven = alloc_vec_const(7, "vec_seven")
+            vec_fifteen = alloc_vec_const(15, "vec_fifteen") if use_depth4_deterministic else None
         else:
             vec_three = alloc_vec_const(3, "vec_three")
             vec_seven = None
+            vec_fifteen = None
 
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
             alloc_vec_const(val1, f"hash_c1_{hi}")
@@ -1014,6 +1108,20 @@ class KernelBuilder:
                 vec_depth3_nodes.append(vec_node)
         else:
             vec_depth3_nodes = []
+        if use_depth4_deterministic:
+            vec_depth4_nodes = []
+            node_addr4 = self.alloc_scratch()
+            for off in range(15, 31):
+                node = self.alloc_scratch(f"node{off}")
+                header.append(
+                    ("alu", ("+", node_addr4, self.scratch["forest_values_p"], header_scratch_const(off)))
+                )
+                header.append(("load", ("load", node, node_addr4)))
+                vec_node = self.alloc_scratch(f"vec_node{off}", VLEN)
+                header.append(("valu", ("vbroadcast", vec_node, node)))
+                vec_depth4_nodes.append(vec_node)
+        else:
+            vec_depth4_nodes = []
         if use_compact_depth_state:
             vec_node21_diff = None
             vec_node43_diff = None
@@ -1058,6 +1166,21 @@ class KernelBuilder:
 
         interleave_groups = self.interleave_groups
         interleave_groups_early = self.interleave_groups_early
+        if use_depth4_deterministic and self.depth4_adaptive_interleave:
+            min_groups = 8
+            while (
+                self.scratch_ptr + 24 * max(interleave_groups, interleave_groups_early)
+                > SCRATCH_SIZE
+            ):
+                if (
+                    interleave_groups_early >= interleave_groups
+                    and interleave_groups_early > min_groups
+                ):
+                    interleave_groups_early -= 1
+                elif interleave_groups > min_groups:
+                    interleave_groups -= 1
+                else:
+                    break
         group_regs = []
         max_groups = max(interleave_groups, interleave_groups_early)
         for g in range(max_groups):
@@ -1239,6 +1362,45 @@ class KernelBuilder:
                 )
                 # Restore full idx from saved path.
                 body.append(("valu", ("+", vec_idx, vec_val_save, vec_seven)))
+            elif depth == 4 and use_depth4_deterministic:
+                # Depth-4 idx is deterministic in [15, 30]. Use a submission-only
+                # deterministic select over preloaded node vectors.
+                body.append(("valu", ("-", vec_addr, vec_idx, vec_fifteen)))
+                body.append(
+                    ("flow", ("vselect", vec_val_save, vec_one, vec_addr, vec_addr))
+                )
+                body.append(
+                    ("flow", ("vselect", vec_node_val, vec_one, vec_depth4_nodes[0], vec_depth4_nodes[0]))
+                )
+                body.append(
+                    ("flow", ("vselect", vec_idx, vec_one, vec_one, vec_one))
+                )
+                for path_i, vec_node in enumerate(vec_depth4_nodes[1:]):
+                    body.append(
+                        ("valu", ("==", vec_addr, vec_val_save, vec_idx))
+                    )
+                    body.append(
+                        ("flow", ("vselect", vec_node_val, vec_addr, vec_node, vec_node_val))
+                    )
+                    if path_i < len(vec_depth4_nodes[1:]) - 1:
+                        body.append(("valu", ("+", vec_idx, vec_idx, vec_one)))
+                body.append(
+                    (
+                        "debug",
+                        (
+                            "vcompare",
+                            vec_node_val,
+                            [(round, i + vi, "node_val") for vi in range(VLEN)],
+                        ),
+                    )
+                )
+                body.append(("valu", ("^", vec_val, vec_val, vec_node_val)))
+                body.extend(
+                    self.build_hash_vec(
+                        vec_val, vec_tmp1, vec_tmp2, round, i, vec_const_map
+                    )
+                )
+                body.append(("valu", ("+", vec_idx, vec_val_save, vec_fifteen)))
             else:
                 # node_val = mem[forest_values_p + idx] (gather)
                 body.append(("valu", ("+", vec_addr, vec_forest_base, vec_idx)))

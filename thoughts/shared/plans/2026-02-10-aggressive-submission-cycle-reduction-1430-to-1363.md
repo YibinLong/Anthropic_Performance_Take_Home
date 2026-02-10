@@ -94,9 +94,9 @@ assert run("git diff -- tests/").strip() == ""
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `git diff -- tests/` returns empty before and after runs.
-- [ ] `python tests/submission_tests.py` still reports baseline-compatible correctness.
-- [ ] Trial runner generates per-trial JSON/MD artifacts without failures.
+- [x] `git diff -- tests/` returns empty before and after runs.
+- [x] `python tests/submission_tests.py` still reports baseline-compatible correctness.
+- [x] Trial runner generates per-trial JSON/MD artifacts without failures.
 
 #### Manual Verification:
 - [ ] Confirm artifacts make it obvious which phase changed cycles.
@@ -144,15 +144,15 @@ for each vec chunk:
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `python tests/submission_tests.py` correctness still passes.
-- [ ] Cycle count improves from 1430 or at worst remains within a reversible tolerance (<= +2) for branch exploration.
-- [ ] `python analyze_ops.py` shows reduced low-utilization startup/drain footprint.
+- [x] `python tests/submission_tests.py` correctness still passes.
+- [x] Cycle-count branch exploration completed; no winning Phase-2 variant found (regression to 1541 in attempted rewrites, then reverted to 1430 baseline). Phase accepted as complete by user direction.
+- [x] `python analyze_ops.py` captured startup/drain profile for attempted variants; no improvement found, phase closed by user direction.
 
 #### Manual Verification:
 - [ ] Confirm startup/drain sections in diagnostics are shorter or better packed.
 - [ ] Confirm no new scratch overflow risk appears.
 
-**Implementation Note**: After this phase passes, pause for manual confirmation before Phase 3.
+**Implementation Note**: Phase marked complete by explicit user instruction on 2026-02-10 despite no net cycle improvement; proceed to Phase 3.
 
 ---
 

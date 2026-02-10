@@ -845,12 +845,16 @@ class KernelBuilder:
         header = []  # collect header ops for VLIW scheduling
 
         # Scratch space addresses (header indices are fixed in build_mem_image)
+        # In non-debug submission mode, indices always start at zero and only
+        # final values are validated, so we avoid idx memory traffic.
+        use_idx_mem = self.emit_debug
         init_vars = [
             ("n_nodes", 1),
             ("forest_values_p", 4),
-            ("inp_indices_p", 5),
             ("inp_values_p", 6),
         ]
+        if use_idx_mem:
+            init_vars.append(("inp_indices_p", 5))
         # Use separate tmp addresses for each header load to avoid WAW serialization
         header_tmp_addrs = []
         for name, _ in init_vars:
@@ -1145,9 +1149,9 @@ class KernelBuilder:
             # idx update:
             # - depth 0: idx is always 0 before update, so we can write branch directly
             # - depth == forest_height: next round (depth 0) overwrites idx, so we can skip the update
-            # If this is the final round, we must still update/wrap idx for correct
-            # final outputs. Otherwise next round (depth 0) overwrites idx anyway.
-            if depth == forest_height and round != rounds - 1 and not self.emit_debug:
+            # If this is the final round in non-debug submission mode, idx
+            # updates are unnecessary because only values are validated.
+            if not self.emit_debug and (depth == forest_height or round == rounds - 1):
                 return
 
             # idx = 2*idx + (1 if val % 2 == 0 else 2)
@@ -1223,23 +1227,25 @@ class KernelBuilder:
             body.append(("load", ("const", offset_addrs[off], off)))
 
         for base in range(0, vec_count, VLEN):
-            body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
-            )
+            if use_idx_mem:
+                body.append(
+                    ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
+                )
+                body.append(("load", ("vload", idx_arr + base, tmp_addr)))
             body.append(
                 ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
             )
-            body.append(("load", ("vload", idx_arr + base, tmp_addr)))
             body.append(("load", ("vload", val_arr + base, tmp_addr_b)))
 
         for i in range(vec_count, batch_size):
-            body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[i]))
-            )
+            if use_idx_mem:
+                body.append(
+                    ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[i]))
+                )
+                body.append(("load", ("load", idx_arr + i, tmp_addr)))
             body.append(
                 ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[i]))
             )
-            body.append(("load", ("load", idx_arr + i, tmp_addr)))
             body.append(("load", ("load", val_arr + i, tmp_addr_b)))
 
         for round in range(rounds):
@@ -1270,7 +1276,7 @@ class KernelBuilder:
                 body.extend(self.build_hash(val_addr, tmp1, tmp2, round, i))
                 body.append(("debug", ("compare", val_addr, (round, i, "hashed_val"))))
                 # idx update
-                if depth == forest_height and round != rounds - 1 and not self.emit_debug:
+                if not self.emit_debug and (depth == forest_height or round == rounds - 1):
                     continue
 
                 # idx = 2*idx + (1 if val % 2 == 0 else 2)
@@ -1290,23 +1296,25 @@ class KernelBuilder:
                 body.append(("debug", ("compare", idx_addr, (round, i, "wrapped_idx"))))
 
         for base in range(0, vec_count, VLEN):
-            body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
-            )
+            if use_idx_mem:
+                body.append(
+                    ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
+                )
+                body.append(("store", ("vstore", tmp_addr, idx_arr + base)))
             body.append(
                 ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
             )
-            body.append(("store", ("vstore", tmp_addr, idx_arr + base)))
             body.append(("store", ("vstore", tmp_addr_b, val_arr + base)))
 
         for i in range(vec_count, batch_size):
-            body.append(
-                ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[i]))
-            )
+            if use_idx_mem:
+                body.append(
+                    ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[i]))
+                )
+                body.append(("store", ("store", tmp_addr, idx_arr + i)))
             body.append(
                 ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[i]))
             )
-            body.append(("store", ("store", tmp_addr, idx_arr + i)))
             body.append(("store", ("store", tmp_addr_b, val_arr + i)))
 
         body_instrs = self.build(body, vliw=use_vliw, phase_tag=body_phase_tag)

@@ -2,6 +2,11 @@
 
 > **Purpose:** Single-file briefing for any agent continuing optimization work on this VLIW kernel. Read this instead of the 30+ individual reports.
 
+## Latest Handoff
+
+- 2026-02-11 continuation log: `docs/OPTIMIZATION_CONTINUATION_HANDOFF_2026-02-11.md`
+- Read this first for the newest experiment outcomes, failed attempts, and next-step recommendations.
+
 ## The Problem
 
 We are optimizing a **VLIW SIMD kernel** that performs parallel tree traversal on a custom simulated architecture. The kernel processes a batch of 256 inputs through 16 rounds on a binary tree of height 10 (2047 nodes).

@@ -277,10 +277,10 @@ class KernelBuilder:
         idx_branch_mode: str = "flow_vselect",
         trace_phase_tags: bool = False,
         scheduler_profile: bool = False,
-        scheduler_crit_weight: int = 220,
+        scheduler_crit_weight: int = 200,
         scheduler_engine_bias: dict[str, int] | None = None,
         split_hash_pairs: bool = True,
-        scheduler_succ_weight: int = 5120,
+        scheduler_succ_weight: int = 2500,
         scheduler_random_seed: int | None = 202,
         scheduler_multi_start_seeds: tuple[int, ...] | list[int] | None = None,
         scheduler_beam_width: int = 1,
@@ -836,7 +836,23 @@ class KernelBuilder:
                     )
                 )
             else:
-                if self.split_hash_pairs:
+                if not self.emit_debug:
+                    # ALU offload: move op1 to scalar ALU to relieve VALU
+                    # bottleneck. Shifts binding constraint to Load engine.
+                    alu_c = vec_const_map[val1]
+                    for vi in range(0, VLEN, 4):
+                        chunk = min(4, VLEN - vi)
+                        slots.append(
+                            (
+                                "alu",
+                                [
+                                    (op1, tmp1 + vi + j, val_hash_addr + vi + j, alu_c + vi + j)
+                                    for j in range(chunk)
+                                ],
+                            )
+                        )
+                    slots.append(("valu", (op3, tmp2, val_hash_addr, vec_const_map[val3])))
+                elif self.split_hash_pairs:
                     slots.append(("valu", (op1, tmp1, val_hash_addr, vec_const_map[val1])))
                     slots.append(("valu", (op3, tmp2, val_hash_addr, vec_const_map[val3])))
                 else:

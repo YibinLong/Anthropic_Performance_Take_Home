@@ -277,13 +277,14 @@ class KernelBuilder:
         idx_branch_mode: str = "flow_vselect",
         trace_phase_tags: bool = False,
         scheduler_profile: bool = False,
-        scheduler_crit_weight: int = 136,
+        scheduler_crit_weight: int = 220,
         scheduler_engine_bias: dict[str, int] | None = None,
         split_hash_pairs: bool = True,
-        scheduler_succ_weight: int = 3584,
-        scheduler_random_seed: int | None = 51,
+        scheduler_succ_weight: int = 5120,
+        scheduler_random_seed: int | None = 202,
         scheduler_multi_start_seeds: tuple[int, ...] | list[int] | None = None,
         scheduler_beam_width: int = 1,
+        scalar_hybrid_count: int = 0,
     ):
         self.instrs = []
         self.scratch = {}
@@ -315,6 +316,7 @@ class KernelBuilder:
             else None
         )
         self.scheduler_beam_width = max(1, int(scheduler_beam_width))
+        self.scalar_hybrid_count = scalar_hybrid_count
         self._schedule_segments = []
 
     def debug_info(self):
@@ -996,10 +998,9 @@ class KernelBuilder:
             header_tmp_addrs.append(self.alloc_scratch())
         for idx_i, (name, header_idx) in enumerate(init_vars):
             htmp = header_tmp_addrs[idx_i]
-            if zero_base is not None:
-                header.append(("flow", ("add_imm", htmp, zero_base, header_idx)))
-            else:
-                header.append(("load", ("const", htmp, header_idx)))
+            # Use load.const for header index computation (2 load slots/cycle
+            # vs 1 flow slot/cycle) to reduce header flow pressure.
+            header.append(("load", ("const", htmp, header_idx)))
             header.append(("load", ("load", self.scratch[name], htmp)))
 
         # scratch_const replacement for header: allocate and emit to header list
@@ -1007,15 +1008,15 @@ class KernelBuilder:
             if val not in self.const_map:
                 addr = self.alloc_scratch(name)
                 self.const_map[val] = addr
-                if zero_base is not None:
-                    header.append(("flow", ("add_imm", addr, zero_base, val)))
-                else:
-                    header.append(("load", ("const", addr, val)))
+                # Use load.const instead of flow.add_imm to reduce header
+                # flow pressure (load has 2 slots/cycle vs flow's 1).
+                header.append(("load", ("const", addr, val)))
             return self.const_map[val]
 
         zero_const = header_scratch_const(0)
         one_const = header_scratch_const(1)
         two_const = header_scratch_const(2)
+        vlen_const = header_scratch_const(VLEN, "vlen_const")
 
         vec_const_map = {}
 
@@ -1235,7 +1236,8 @@ class KernelBuilder:
                 }
             )
 
-        vec_count = (batch_size // VLEN) * VLEN
+        scalar_count = self.scalar_hybrid_count if not self.emit_debug else 0
+        vec_count = ((batch_size - scalar_count) // VLEN) * VLEN
         def emit_vector_group_ops(round, i, regs, depth):
             keys = [(round, i + vi, "idx") for vi in range(VLEN)]
 
@@ -1590,12 +1592,11 @@ class KernelBuilder:
                         ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
                     )
                 body.append(("load", ("vload", idx_arr + base, tmp_addr)))
-            if zero_base is not None:
-                body.append(("flow", ("add_imm", tmp_addr_b, self.scratch["inp_values_p"], base)))
+            # Use ALU incremental addressing to avoid flow.add_imm bottleneck.
+            if base == 0:
+                body.append(("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], zero_const)))
             else:
-                body.append(
-                    ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
-                )
+                body.append(("alu", ("+", tmp_addr_b, tmp_addr_b, vlen_const)))
             body.append(("load", ("vload", val_arr + base, tmp_addr_b)))
 
         for i in range(vec_count, batch_size):
@@ -1643,7 +1644,12 @@ class KernelBuilder:
                 body.extend(self.build_hash(val_addr, tmp1, tmp2, round, i))
                 body.append(("debug", ("compare", val_addr, (round, i, "hashed_val"))))
                 # idx update
-                if not self.emit_debug and (depth == forest_height or round == rounds - 1):
+                # Scalar elements always need idx updates (except at final round)
+                # because they use mem[forest_values_p + idx] for gathers at all depths.
+                # The vector path can skip at depth==forest_height because it preloads
+                # node values, but the scalar path does actual memory gathers.
+                scalar_skip_idx = not self.emit_debug and round == rounds - 1
+                if scalar_skip_idx:
                     continue
 
                 # idx = 2*idx + (1 if val % 2 == 0 else 2)
@@ -1657,9 +1663,15 @@ class KernelBuilder:
                     body.append(("alu", ("<<", idx_addr, idx_addr, one_const)))
                     body.append(("alu", ("+", idx_addr, idx_addr, tmp3)))
                 body.append(("debug", ("compare", idx_addr, (round, i, "next_idx"))))
-                # idx wrap is only required in debug mode where idx traces are checked.
-                if need_wrap_checks and depth == forest_height:
-                    body.append(("alu", ("<", tmp1, idx_addr, self.scratch["n_nodes"])))
+                # idx wrap at depth==forest_height:
+                # Scalar elements need this even in submission mode because
+                # they use actual idx for memory gathers at all depths.
+                if depth == forest_height:
+                    if need_wrap_checks:
+                        body.append(("alu", ("<", tmp1, idx_addr, self.scratch["n_nodes"])))
+                    else:
+                        n_nodes_const = header_scratch_const(n_nodes)
+                        body.append(("alu", ("<", tmp1, idx_addr, n_nodes_const)))
                     body.append(("alu", ("*", idx_addr, idx_addr, tmp1)))
                 body.append(("debug", ("compare", idx_addr, (round, i, "wrapped_idx"))))
 
@@ -1672,14 +1684,12 @@ class KernelBuilder:
                         ("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], offset_addrs[base]))
                     )
                 body.append(("store", ("vstore", tmp_addr, idx_arr + base)))
-            if zero_base is not None:
-                body.append(("flow", ("add_imm", tmp_addr_b, self.scratch["inp_values_p"], base)))
-                body.append(("store", ("vstore", tmp_addr_b, val_arr + base)))
+            # Use ALU incremental addressing for value stores (same as prologue).
+            if base == 0:
+                body.append(("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], zero_const)))
             else:
-                body.append(
-                    ("alu", ("+", tmp_addr_b, self.scratch["inp_values_p"], offset_addrs[base]))
-                )
-                body.append(("store", ("vstore", tmp_addr_b, val_arr + base)))
+                body.append(("alu", ("+", tmp_addr_b, tmp_addr_b, vlen_const)))
+            body.append(("store", ("vstore", tmp_addr_b, val_arr + base)))
 
         for i in range(vec_count, batch_size):
             if use_idx_mem:
@@ -1700,6 +1710,10 @@ class KernelBuilder:
 
         body_instrs = self.build(body, vliw=True, phase_tag=body_phase_tag)
         self.instrs.extend(body_instrs)
+        # Note: splitting the body into separately-scheduled segments can
+        # be tested by inserting build() boundaries at round transitions,
+        # but this loses cross-segment overlap so is only beneficial if
+        # per-segment scheduling quality improves enough to compensate.
         # Required to match with the yield in reference_kernel2
         if self.emit_debug:
             self.instrs.append({"flow": [("pause",)]})

@@ -272,17 +272,18 @@ class KernelBuilder:
         interleave_groups_early: int | None = 29,
         depth2_select_mode: str = "flow_vselect",
         depth3_deterministic: bool = False,
+        depth3_broadcast_vselect: bool = True,
         depth4_mode: str = "off",
         depth4_adaptive_interleave: bool = True,
         idx_branch_mode: str = "flow_vselect",
         trace_phase_tags: bool = False,
         scheduler_profile: bool = False,
-        scheduler_crit_weight: int = 200,
+        scheduler_crit_weight: int = 300,
         scheduler_engine_bias: dict[str, int] | None = None,
         split_hash_pairs: bool = True,
-        scheduler_succ_weight: int = 2500,
+        scheduler_succ_weight: int = 1500,
         scheduler_random_seed: int | None = 202,
-        scheduler_multi_start_seeds: tuple[int, ...] | list[int] | None = None,
+        scheduler_multi_start_seeds: tuple[int, ...] | list[int] | None = tuple(range(1, 2001, 4)),
         scheduler_beam_width: int = 1,
         scalar_hybrid_count: int = 0,
     ):
@@ -298,6 +299,7 @@ class KernelBuilder:
         )
         self.depth2_select_mode = depth2_select_mode
         self.depth3_deterministic = depth3_deterministic
+        self.depth3_broadcast_vselect = depth3_broadcast_vselect
         if depth4_mode not in {"off", "deterministic16"}:
             raise ValueError(f"Unsupported depth4_mode={depth4_mode}")
         self.depth4_mode = depth4_mode
@@ -984,6 +986,12 @@ class KernelBuilder:
         use_depth3_deterministic = (
             not self.emit_debug and self.depth3_deterministic and use_compact_depth_state
         )
+        use_depth3_broadcast_vselect = (
+            not self.emit_debug
+            and self.depth3_broadcast_vselect
+            and use_compact_depth_state
+            and not use_depth3_deterministic  # don't enable both
+        )
         use_depth4_deterministic = (
             not self.emit_debug
             and self.depth4_mode == "deterministic16"
@@ -1154,7 +1162,7 @@ class KernelBuilder:
         header.append(("valu", ("vbroadcast", vec_node4, node4)))
         header.append(("valu", ("vbroadcast", vec_node5, node5)))
         header.append(("valu", ("vbroadcast", vec_node6, node6)))
-        if use_depth3_deterministic:
+        if use_depth3_deterministic or use_depth3_broadcast_vselect:
             vec_depth3_nodes = []
             node_addr = self.alloc_scratch()
             for off in range(7, 15):
@@ -1168,6 +1176,13 @@ class KernelBuilder:
                 vec_depth3_nodes.append(vec_node)
         else:
             vec_depth3_nodes = []
+        if use_depth3_broadcast_vselect:
+            # Allocate vector constants for path values 0-7
+            vec_path_consts = []
+            for pv in range(8):
+                vec_path_consts.append(alloc_vec_const(pv, f"vec_const_{pv}"))
+        else:
+            vec_path_consts = []
         if use_depth4_deterministic:
             vec_depth4_nodes = []
             node_addr4 = self.alloc_scratch()
@@ -1226,7 +1241,7 @@ class KernelBuilder:
 
         interleave_groups = self.interleave_groups
         interleave_groups_early = self.interleave_groups_early
-        if use_depth4_deterministic and self.depth4_adaptive_interleave:
+        if (use_depth4_deterministic and self.depth4_adaptive_interleave) or use_depth3_broadcast_vselect:
             min_groups = 8
             while (
                 self.scratch_ptr + 24 * max(interleave_groups, interleave_groups_early)
@@ -1357,6 +1372,35 @@ class KernelBuilder:
                         )
                     else:
                         raise ValueError(f"Unknown depth2_select_mode={self.depth2_select_mode}")
+                body.append(
+                    (
+                        "debug",
+                        (
+                            "vcompare",
+                            vec_node_val,
+                            [(round, i + vi, "node_val") for vi in range(VLEN)],
+                        ),
+                    )
+                )
+                # val = myhash(val ^ node_val)
+                body.append(("valu", ("^", vec_val, vec_val, vec_node_val)))
+                body.extend(
+                    self.build_hash_vec(
+                        vec_val, vec_tmp1, vec_tmp2, round, i, vec_const_map
+                    )
+                )
+            elif depth == 3 and use_depth3_broadcast_vselect:
+                # VALU-based 8-way selection using indicator masks.
+                # vec_idx carries path in [0,7]. For each possible path value p,
+                # create mask = (vec_idx == p), multiply by node[7+p], accumulate.
+                # Uses vec_addr as temp for masks, vec_node_val as accumulator.
+                # Path 0: mask + multiply
+                body.append(("valu", ("==", vec_addr, vec_idx, vec_path_consts[0])))
+                body.append(("valu", ("*", vec_node_val, vec_addr, vec_depth3_nodes[0])))
+                # Paths 1-7: mask + multiply_add
+                for p in range(1, 8):
+                    body.append(("valu", ("==", vec_addr, vec_idx, vec_path_consts[p])))
+                    body.append(("valu", ("multiply_add", vec_node_val, vec_addr, vec_depth3_nodes[p], vec_node_val)))
                 body.append(
                     (
                         "debug",
